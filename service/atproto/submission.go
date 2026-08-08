@@ -93,6 +93,11 @@ func TrackToPlayRecord(track *models.Track) (*teal.AlphaFeedPlay, error) {
 		releaseNamePtr = &track.Album
 	}
 
+	var releaseDiscriminantPtr *string
+	if track.ReleaseDiscriminant != "" {
+		releaseDiscriminantPtr = &track.ReleaseDiscriminant
+	}
+
 	// Get submission client agent
 	submissionAgent := viper.GetString("app.submission_agent")
 	if submissionAgent == "" {
@@ -108,6 +113,7 @@ func TrackToPlayRecord(track *models.Track) (*teal.AlphaFeedPlay, error) {
 		RecordingMbId:          models.FormatMBIDURI(track.RecordingMBID),
 		ReleaseMbId:            models.FormatMBIDURI(track.ReleaseMBID),
 		ReleaseName:            releaseNamePtr,
+		ReleaseDiscriminant:    releaseDiscriminantPtr,
 		Isrc:                   isrcPtr,
 		OriginUrl:              originUrlPtr,
 		MusicServiceBaseDomain: servicePtr,
