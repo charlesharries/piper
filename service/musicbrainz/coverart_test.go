@@ -3,6 +3,7 @@ package musicbrainz
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"testing"
 
 	"github.com/teal-fm/piper/models"
@@ -44,6 +45,59 @@ func dreams() models.Track {
 		Artist:     []models.Artist{{Name: "Fleetwood Mac"}},
 		Album:      "Rumours",
 		DurationMs: 257800,
+	}
+}
+
+// The browse is a MusicBrainz call, and MusicBrainz allows one request per
+// second across the whole process, so it must not be paid when the pressing we
+// already picked has art.
+func TestResolveSkipsBrowseWhenChosenReleaseHasArt(t *testing.T) {
+	only := release("Rumours", "Rumours", "1977-02-04", "US")
+	rec := recording("Dreams", "Fleetwood Mac", 257800, only)
+
+	svc, transport := newTestService(t,
+		// The archive answers a redirect for a release it holds art for.
+		route{match: "coverartarchive.org", status: http.StatusTemporaryRedirect, body: ""},
+		route{match: "/ws/2/recording?", body: searchBody(t, rec)},
+	)
+
+	match, err := svc.Resolve(context.Background(), dreams())
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if match.Release == nil || match.Release.ID != only.ID {
+		t.Errorf("release = %v, want %s", match.Release, only.ID)
+	}
+	if probes := transport.artProbes(); len(probes) != 1 {
+		t.Errorf("made %d art probes, want 1", len(probes))
+	}
+	if browses := transport.browses(); len(browses) != 0 {
+		t.Errorf("browsed %d times despite the release having art: %v", len(browses), browses)
+	}
+}
+
+// A probe that errors or answers oddly must not be read as "has art", or a
+// pressing with a perfectly good cover would be swapped away on a network blip.
+func TestResolveBrowsesWhenArtProbeIsInconclusive(t *testing.T) {
+	bare := release("Rumours", "Rumours", "1977-02-04", "US")
+	withArt := release("Rumours", "Rumours", "1977-06-01", "GB")
+	rec := recording("Dreams", "Fleetwood Mac", 257800, bare)
+
+	svc, transport := newTestService(t,
+		route{match: "coverartarchive.org", status: http.StatusInternalServerError, body: ""},
+		route{match: "/ws/2/release?", body: browseBody(t, map[string]bool{withArt.ID: true}, bare, withArt)},
+		route{match: "/ws/2/recording?", body: searchBody(t, rec)},
+	)
+
+	match, err := svc.Resolve(context.Background(), dreams())
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if len(transport.browses()) != 1 {
+		t.Error("expected the browse to run when the probe was inconclusive")
+	}
+	if match.Release == nil || match.Release.ID != withArt.ID {
+		t.Errorf("release = %v, want %s", match.Release, withArt.ID)
 	}
 }
 
@@ -133,8 +187,7 @@ func TestPressingsAreCachedPerReleaseGroup(t *testing.T) {
 		}
 	}
 
-	browses := len(transport.requested) - len(transport.searches())
-	if browses != 1 {
-		t.Errorf("made %d browses, want 1", browses)
+	if browses := transport.browses(); len(browses) != 1 {
+		t.Errorf("made %d browses, want 1", len(browses))
 	}
 }

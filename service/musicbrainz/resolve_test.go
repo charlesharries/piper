@@ -58,17 +58,24 @@ func (rt *routedTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	}, nil
 }
 
-// searches returns just the recording-search URLs, so tier assertions are not
-// disturbed by the release browse that cover art selection performs.
-func (rt *routedTransport) searches() []string {
+// matching returns the requested URLs containing want. Cover art selection
+// issues its own requests, so assertions name the traffic they care about
+// rather than counting everything.
+func (rt *routedTransport) matching(want string) []string {
 	var out []string
 	for _, url := range rt.requested {
-		if strings.Contains(url, "/ws/2/recording?") {
+		if strings.Contains(url, want) {
 			out = append(out, url)
 		}
 	}
 	return out
 }
+
+// searches are recording searches, browses are release-group browses, and
+// artProbes are Cover Art Archive lookups.
+func (rt *routedTransport) searches() []string  { return rt.matching("/ws/2/recording?") }
+func (rt *routedTransport) browses() []string   { return rt.matching("/ws/2/release?") }
+func (rt *routedTransport) artProbes() []string { return rt.matching("coverartarchive.org") }
 
 func newTestService(t *testing.T, routes ...route) (*Service, *routedTransport) {
 	t.Helper()
