@@ -549,13 +549,25 @@ func (s *Service) Resolve(ctx context.Context, track models.Track) (*Match, erro
 
 	// The ListenBrainz mapper is purpose-built for this and beats raw search on
 	// messy input, but it needs a token, so it is optional.
+	var mapped *Match
 	if s.mapper != nil {
-		if match, err := s.resolveViaMapper(ctx, in, track); err != nil {
+		match, err := s.resolveViaMapper(ctx, in, track)
+		if err != nil {
 			s.logger.Printf("ListenBrainz mapper lookup failed for %q, falling back: %v", track.Name, err)
-		} else if match != nil {
-			s.logMatch(track, match)
-			return match, nil
 		}
+		mapped = match
+	}
+	// A mapper answer beat no alternatives, so clearing minConfidence says less
+	// about it than the same score would for a ranked search result. Accept it
+	// outright only when nothing about it looks doubtful; otherwise keep it as
+	// the incumbent and let search offer something better.
+	if mapped != nil && !in.albumDisagrees(mapped.Recording) {
+		s.logMatch(track, mapped)
+		return mapped, nil
+	}
+	if mapped != nil {
+		s.logger.Printf("second opinion on %q: %q is not on %q, searching",
+			track.Name, mapped.Recording.Title, track.Album)
 	}
 
 	var allCandidates []candidate
@@ -578,6 +590,13 @@ func (s *Service) Resolve(ctx context.Context, track models.Track) (*Match, erro
 		}
 
 		best := ranked[0]
+		// The mapper's answer was doubted, not discarded; it still wins if
+		// search cannot do better.
+		if mapped != nil && mapped.Score >= best.score {
+			s.logMatch(track, mapped)
+			return mapped, nil
+		}
+
 		release := s.resolveRelease(ctx, in, best.recording, nil)
 		match := &Match{
 			Recording:  best.recording,
@@ -590,6 +609,10 @@ func (s *Service) Resolve(ctx context.Context, track models.Track) (*Match, erro
 		return match, nil
 	}
 
+	if mapped != nil {
+		s.logMatch(track, mapped)
+		return mapped, nil
+	}
 	if lastErr != nil && len(allCandidates) == 0 {
 		return nil, lastErr
 	}

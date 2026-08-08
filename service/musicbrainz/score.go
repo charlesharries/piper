@@ -308,6 +308,26 @@ func (in matchInput) albumScore(releases []Release, trackTitle string) float64 {
 	return math.Min(1, math.Max(0, best))
 }
 
+// albumAgreement is the album score below which a recording is treated as not
+// belonging to the album the play named. Correct attributions land near 1;
+// scores around a half mean the best release the recording can be attributed to
+// is a different record that merely shares an artist.
+const albumAgreement = 0.8
+
+// albumDisagrees reports whether a recording contradicts the album the music
+// service named. It is the check a mapper's answer has to pass that a ranked
+// search result does not need: a search winner already beat every alternative
+// on this signal, where a mapper's answer was never compared to anything.
+//
+// Silent when the play named no album, or when the recording carries no
+// releases to judge -- neither is evidence against it.
+func (in matchInput) albumDisagrees(rec Recording) bool {
+	if in.album == "" || len(rec.Releases) == 0 {
+		return false
+	}
+	return in.albumScore(rec.Releases, rec.Title) < albumAgreement
+}
+
 // compareAlbum matches a release title against the incoming album name, trying
 // the name as given and with any edition suffix removed, since services report
 // "Rumours (Super Deluxe)" where MusicBrainz has "Rumours".

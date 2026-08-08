@@ -415,3 +415,91 @@ func TestHydrateTrackErrorsWithoutConfidentMatch(t *testing.T) {
 		t.Errorf("HydrateTrack() = %v, want nil", got)
 	}
 }
+
+// A mapper's answer beat no alternatives, so a recording that cannot be
+// attributed to the album the play named has to be checked against search.
+// Death Cab's "Stability" was resolved to The Photo Album this way: ListenBrainz
+// named the reissue's recording, which scores perfectly on title and duration
+// and only disagrees on the album.
+func TestResolveDoubtsMapperWhenAlbumDisagrees(t *testing.T) {
+	photoAlbum := release("The Photo Album", "The Photo Album", "2001-10-09", "US")
+	wrong := recording("Stability", "Death Cab for Cutie", 740864, photoAlbum)
+	wrong.ID = "photo-album-mbid"
+
+	stabilityEP := release("The Stability EP", "The Stability EP", "2002-03-05", "US")
+	right := recording("Stability / Coney Island (alternate version)", "Death Cab for Cutie", 741600, stabilityEP)
+	right.ID = "stability-ep-mbid"
+
+	svc, transport := newTestService(t,
+		route{match: "recording/photo-album-mbid", body: mustJSON(t, wrong)},
+		route{match: "/ws/2/recording?", body: searchBody(t, right)},
+	)
+	svc.mapper = stubMapper{result: &MapperResult{RecordingMBID: "photo-album-mbid"}}
+
+	match, err := svc.Resolve(context.Background(), stability())
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if match.Source != "musicbrainz" {
+		t.Errorf("source = %q, want search to have overruled the mapper", match.Source)
+	}
+	if match.Release == nil || match.Release.Title != "The Stability EP" {
+		t.Errorf("release = %v, want The Stability EP", match.Release)
+	}
+	if len(transport.searches()) == 0 {
+		t.Error("expected a search for the second opinion")
+	}
+}
+
+// The doubt must not cost a search when the mapper's answer sits on the album
+// the play named -- that is the whole point of having a mapper.
+func TestResolveTrustsMapperWhenAlbumAgrees(t *testing.T) {
+	stabilityEP := release("The Stability EP", "The Stability EP", "2002-03-05", "US")
+	rec := recording("Stability", "Death Cab for Cutie", 741000, stabilityEP)
+	rec.ID = "good-mbid"
+
+	svc, transport := newTestService(t, route{match: "recording/good-mbid", body: mustJSON(t, rec)})
+	svc.mapper = stubMapper{result: &MapperResult{RecordingMBID: "good-mbid"}}
+
+	match, err := svc.Resolve(context.Background(), stability())
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if match.Source != "listenbrainz" {
+		t.Errorf("source = %q, want the mapper's answer taken as-is", match.Source)
+	}
+	if searches := transport.searches(); len(searches) != 0 {
+		t.Errorf("searched despite the mapper agreeing on the album: %v", searches)
+	}
+}
+
+// Doubted is not discarded: when search offers nothing better, the mapper's
+// answer still stands rather than the play going unhydrated.
+func TestResolveKeepsMapperWhenSearchCannotBeatIt(t *testing.T) {
+	photoAlbum := release("The Photo Album", "The Photo Album", "2001-10-09", "US")
+	rec := recording("Stability", "Death Cab for Cutie", 740864, photoAlbum)
+	rec.ID = "photo-album-mbid"
+
+	svc, _ := newTestService(t,
+		route{match: "recording/photo-album-mbid", body: mustJSON(t, rec)},
+		route{match: "/ws/2/recording?", body: `{"count":0,"recordings":[]}`},
+	)
+	svc.mapper = stubMapper{result: &MapperResult{RecordingMBID: "photo-album-mbid"}}
+
+	match, err := svc.Resolve(context.Background(), stability())
+	if err != nil {
+		t.Fatalf("Resolve() error = %v, want the mapper's answer to stand", err)
+	}
+	if match.Source != "listenbrainz" || match.Recording.ID != "photo-album-mbid" {
+		t.Errorf("match = %q via %s, want the mapper's answer kept", match.Recording.Title, match.Source)
+	}
+}
+
+func stability() models.Track {
+	return models.Track{
+		Name:       "Stability",
+		Artist:     []models.Artist{{Name: "Death Cab for Cutie"}},
+		Album:      "The Stability EP",
+		DurationMs: 740864,
+	}
+}
