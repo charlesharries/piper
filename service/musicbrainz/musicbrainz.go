@@ -113,6 +113,9 @@ type Service struct {
 
 	// searchCache holds search and recording lookup results, keyed by endpoint.
 	searchCache *ttlCache[[]Recording]
+	// pressingsCache holds a release group's pressings and which of them have
+	// cover art, keyed by release group MBID.
+	pressingsCache *ttlCache[pressings]
 }
 
 // Option configures a Service after construction.
@@ -143,11 +146,12 @@ func NewMusicBrainzService(db *db.DB, opts ...Option) *Service {
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},
-		limiter:     limiter,
-		searchCache: newTTLCache[[]Recording](maxSearchCacheEntries),
-		cacheTTL:    defaultCacheTTL,              // Set the cache TTL
-		cleaner:     *NewMetadataCleaner("Latin"), // Initialize the cleaner
-		logger:      logger,
+		limiter:        limiter,
+		searchCache:    newTTLCache[[]Recording](maxSearchCacheEntries),
+		pressingsCache: newTTLCache[pressings](maxSearchCacheEntries),
+		cacheTTL:       defaultCacheTTL,              // Set the cache TTL
+		cleaner:        *NewMetadataCleaner("Latin"), // Initialize the cleaner
+		logger:         logger,
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -590,6 +594,15 @@ func (s *Service) Resolve(ctx context.Context, track models.Track) (*Match, erro
 // more request to fetch the recording's full release list, which search results
 // only ever carry a slice of.
 func (s *Service) resolveRelease(ctx context.Context, in matchInput, rec Recording, artOwners map[string]bool) *Release {
+	release := s.pickRelease(ctx, in, rec, artOwners)
+
+	// The release MBID is the only identifier in a play record that resolves to
+	// cover art, so make a last pass for a pressing that actually has some.
+	return s.preferReleaseWithArt(ctx, in, rec, release)
+}
+
+// pickRelease chooses the release on metadata grounds alone.
+func (s *Service) pickRelease(ctx context.Context, in matchInput, rec Recording, artOwners map[string]bool) *Release {
 	release, score, _ := bestRelease(in, rec.Releases, rec.Title, artOwners)
 	if release != nil && score >= releaseConfidence {
 		return release

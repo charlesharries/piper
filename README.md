@@ -98,6 +98,20 @@ which is imported on the [./pages/templates/layouts/base.gohtml](./pages/templat
 1. Install tailwindcss cli `npm install tailwindcss @tailwindcss/cli`
 2. run `npx @tailwindcss/cli -i ./pages/static/base.css -o ./pages/static/main.css --watch`
 
+#### cover art
+
+`fm.teal.alpha.feed.play` has no artwork field, and the Cover Art Archive is keyed on releases rather than recordings. `releaseMbId` is therefore the only identifier in a play record that resolves to a cover, so consumers can build the URL themselves — strip the `mbid:` prefix and ask for the size you want:
+
+```
+https://coverartarchive.org/release/<uuid>/front-250
+https://coverartarchive.org/release/<uuid>/front-500
+https://coverartarchive.org/release/<uuid>/front-1200
+```
+
+Each 307-redirects to the image, or 404s when that release has no cover. `recordingMbId` and `artistMbId` have no artwork; don't try them.
+
+Artwork is uploaded per pressing and most pressings have none, so which release piper picks decides whether that URL works. Release selection therefore scores artwork availability alongside the metadata signals (see [`service/musicbrainz/coverart.go`](./service/musicbrainz/coverart.go)) and prefers a pressing the archive holds a cover for, provided it is an equally good answer for the album. Getting the right album still wins over getting a cover.
+
 #### Lexicon changes
 
 1. Copy the new or changed json schema files to the [lexicon folders](./lexicons)
