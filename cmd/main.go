@@ -10,6 +10,7 @@ import (
 
 	"github.com/teal-fm/piper/service/applemusic"
 	"github.com/teal-fm/piper/service/lastfm"
+	"github.com/teal-fm/piper/service/listenbrainz"
 	"github.com/teal-fm/piper/service/playingnow"
 
 	"github.com/spf13/viper"
@@ -96,7 +97,16 @@ func main() {
 		log.Fatalf("Error creating ATproto auth service: %v", err)
 	}
 
-	mbService := musicbrainz.NewMusicBrainzService(database)
+	// The ListenBrainz mapper resolves plays more reliably than MusicBrainz
+	// search, but its endpoint needs a token. Without one, NewMapper returns nil
+	// and lookups fall back to searching MusicBrainz directly.
+	var mbOptions []musicbrainz.Option
+	if mapper := listenbrainz.NewMapper(viper.GetString("listenbrainz.token")); mapper != nil {
+		log.Println("ListenBrainz MBID mapper enabled")
+		mbOptions = append(mbOptions, musicbrainz.WithMapper(mapper))
+	}
+
+	mbService := musicbrainz.NewMusicBrainzService(database, mbOptions...)
 	playingNowService := playingnow.NewPlayingNowService(database, atprotoService, mbService)
 
 	// Check feature toggles for music services

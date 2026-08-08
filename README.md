@@ -56,6 +56,8 @@ You now have to bring your own private key to run piper. Can do this via goat `g
 
 - `LASTFM_API_KEY` - Your lastfm api key. Can find out how to setup [here](https://www.last.fm/api)
 
+- `LISTENBRAINZ_TOKEN` - Optional. A ListenBrainz user token from [your profile](https://listenbrainz.org/profile/). When set, piper resolves plays to MusicBrainz IDs using ListenBrainz's MBID mapper before falling back to searching MusicBrainz, which matches messy metadata from streaming services more reliably. Piper works without it.
+
 - `TRACKER_INTERVAL` - How long between checks to see if the registered users are listening to new music
 - `DB_PATH` - Path for the sqlite db. If you are using the docker compose probably want `/db/piper.db` to persist data
 - `ALLOWED_DIDS` - Restricts the ATProto accounts that can sign-in to the instance to a specific list of DIDs. Supply full DIDs as a space-separated list (e.g., `ALLOWED_DIDS=did:plc:abcdefg did:web:example.com`).
