@@ -190,23 +190,47 @@ func newMatchInput(track models.Track) matchInput {
 	}
 }
 
+// medleySeparator joins the songs of a combined track. MusicBrainz titles a
+// two-song recording "A / B", where a music service reports only the song the
+// listener thinks they are playing -- Death Cab's "Stability" is catalogued as
+// "Stability / Coney Island (alternate version)".
+const medleySeparator = " / "
+
 // titleScore compares the incoming title against a candidate's, and reports
 // whether the candidate carries an unmatched variant qualifier.
+//
+// A medley is scored on its best-matching song rather than the whole string,
+// which also decides whose qualifier is judged: in "A / B (alternate version)"
+// the qualifier belongs to B, and a play of A should not be penalised for it.
 func (in matchInput) titleScore(recTitle string) (score float64, unmatchedVariant bool) {
-	recBase, recQualifier := splitQualifier(recTitle)
-	recFull := normalize(recTitle)
+	// The title as a whole comes first, since plenty of titles contain a slash
+	// without being a medley.
+	score, unmatchedVariant = in.compareTitle(recTitle)
+
+	if parts := strings.Split(recTitle, medleySeparator); len(parts) > 1 {
+		for _, part := range parts {
+			if partScore, partVariant := in.compareTitle(part); partScore > score {
+				score, unmatchedVariant = partScore, partVariant
+			}
+		}
+	}
+	return score, unmatchedVariant
+}
+
+// compareTitle rates one title against the incoming play, reporting whether it
+// carries a variant qualifier the play never asked for.
+func (in matchInput) compareTitle(title string) (float64, bool) {
+	base, qualifier := splitQualifier(title)
 
 	// Compare both the full titles and the qualifier-stripped bases, and keep
 	// the better reading. Either side may carry a qualifier the other lacks.
-	score = math.Max(
-		similarity(in.title, recFull),
-		similarity(in.titleBase, recBase),
+	score := math.Max(
+		similarity(in.title, normalize(title)),
+		similarity(in.titleBase, base),
 	)
 
-	if isVariantQualifier(recQualifier) && similarity(in.qualifier, recQualifier) < 0.8 {
-		unmatchedVariant = true
-	}
-	return score, unmatchedVariant
+	unmatched := isVariantQualifier(qualifier) && similarity(in.qualifier, qualifier) < 0.8
+	return score, unmatched
 }
 
 // artistScore returns the best similarity between any incoming artist name and

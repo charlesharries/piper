@@ -287,3 +287,36 @@ func TestIsVariantQualifier(t *testing.T) {
 		})
 	}
 }
+
+// MusicBrainz catalogues a two-song track as "A / B", while services report only
+// the song the listener knows. Scoring the whole string sent Death Cab's
+// "Stability" to The Photo Album instead of the EP it was played from.
+func TestTitleScoreMatchesOneSongOfAMedley(t *testing.T) {
+	in := newMatchInput(models.Track{Name: "Stability", Album: "The Stability EP"})
+
+	score, variant := in.titleScore("Stability / Coney Island (alternate version)")
+	if score < 0.99 {
+		t.Errorf("title score = %.2f, want a full match on the first song", score)
+	}
+	// "(alternate version)" qualifies Coney Island, not Stability.
+	if variant {
+		t.Error("penalised for a qualifier belonging to the other song in the medley")
+	}
+}
+
+// A qualifier on the song that actually matched must still count.
+func TestTitleScoreKeepsVariantOnTheMatchedSong(t *testing.T) {
+	in := newMatchInput(models.Track{Name: "Stability"})
+	if _, variant := in.titleScore("Stability (live) / Coney Island"); !variant {
+		t.Error("expected the live qualifier on the matched song to be penalised")
+	}
+}
+
+// A slash that is part of the name must not be read as a medley separator.
+func TestTitleScoreLeavesNonMedleySlashesAlone(t *testing.T) {
+	in := newMatchInput(models.Track{Name: "Sgt. Pepper's Lonely Hearts Club Band / With a Little Help From My Friends"})
+	score, _ := in.titleScore("Sgt. Pepper's Lonely Hearts Club Band / With a Little Help From My Friends")
+	if score < 0.99 {
+		t.Errorf("whole-title match = %.2f, want the full string to still win", score)
+	}
+}

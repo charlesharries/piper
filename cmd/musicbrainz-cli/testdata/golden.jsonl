@@ -68,3 +68,4 @@
 # --- Must be rejected rather than matched to the least-bad candidate ---
 {"name":"asdfgh","artist":"qwerty","album":"zxcvbn","note":"nonsense","expect_no_match":true}
 {"name":"","artist":"","album":"","note":"empty input","expect_no_match":true}
+{"name": "Stability", "artist": "Death Cab for Cutie", "album": "The Stability EP", "duration_ms": 741000, "note": "EP track catalogued as a medley", "expect_release_title": "The Stability EP"}
