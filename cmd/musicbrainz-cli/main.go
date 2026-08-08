@@ -17,6 +17,9 @@ import (
 	"os"
 	"strings"
 
+	"github.com/spf13/viper"
+
+	"github.com/teal-fm/piper/config"
 	"github.com/teal-fm/piper/models"
 	"github.com/teal-fm/piper/service/listenbrainz"
 	"github.com/teal-fm/piper/service/musicbrainz"
@@ -73,6 +76,7 @@ func main() {
 		explain   = flag.String("explain", "", "Show scored candidates: 'top' (best 5), 'all', or 'miss' (only where the expectation failed)")
 	)
 	flag.Parse()
+	config.Load()
 
 	service := musicbrainz.NewMusicBrainzService(nil, mapperOption()...)
 
@@ -106,7 +110,7 @@ func main() {
 // mapperOption enables the ListenBrainz mapper when a token is available, so
 // the CLI evaluates the same pipeline the service runs.
 func mapperOption() []musicbrainz.Option {
-	mapper := listenbrainz.NewMapper(os.Getenv("LISTENBRAINZ_TOKEN"))
+	mapper := listenbrainz.NewMapper(viper.GetString("listenbrainz.token"))
 	if mapper == nil {
 		return nil
 	}
