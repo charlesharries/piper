@@ -11,7 +11,6 @@ import (
 
 	"github.com/bluesky-social/indigo/atproto/client"
 	lexutil "github.com/bluesky-social/indigo/lex/util"
-	"github.com/spf13/viper"
 
 	comatproto "github.com/bluesky-social/indigo/api/atproto"
 	"github.com/teal-fm/piper/api/teal"
@@ -263,11 +262,7 @@ func (p *Service) trackToPlayView(track *models.Track) (*teal.AlphaFeedDefs_Play
 		releaseNamePtr = &track.Album
 	}
 
-	// Get submission client agent
-	submissionAgent := viper.GetString("app.submission_agent")
-	if submissionAgent == "" {
-		submissionAgent = models.SubmissionAgent
-	}
+	submissionAgent := models.SubmissionAgent()
 
 	playView := &teal.AlphaFeedDefs_PlayView{
 		TrackName:              track.Name,

@@ -297,8 +297,11 @@ func (s *Service) cacheRecordings(endpoint string, recordings []Recording) {
 }
 
 // userAgent identifies piper to MusicBrainz, which requires a contactable
-// application string.
-var userAgent = models.SubmissionAgent + " ( https://github.com/teal-fm/piper )"
+// application string. Resolved per request rather than once at init, because the
+// configured agent is not loaded until after package initialisation.
+func userAgent() string {
+	return models.SubmissionAgent() + " ( https://github.com/teal-fm/piper )"
+}
 
 // maxAttempts bounds retries of a single request. MusicBrainz sheds load with
 // 503s routinely; without a retry the play loses its MBIDs permanently, because
@@ -310,7 +313,7 @@ func executeRequest(ctx context.Context, client *http.Client, endpoint string) (
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
-	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("User-Agent", userAgent())
 
 	resp, err := client.Do(req)
 	if err != nil {

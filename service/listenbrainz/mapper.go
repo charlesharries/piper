@@ -21,8 +21,12 @@ import (
 
 const lookupEndpoint = "https://api.listenbrainz.org/1/metadata/lookup/"
 
-// userAgent identifies piper to ListenBrainz.
-var userAgent = models.SubmissionAgent + " ( https://github.com/teal-fm/piper )"
+// userAgent identifies piper to ListenBrainz. Resolved per request rather than
+// once at init, because the configured agent is not loaded until after package
+// initialisation.
+func userAgent() string {
+	return models.SubmissionAgent() + " ( https://github.com/teal-fm/piper )"
+}
 
 // Mapper is a client for the ListenBrainz metadata lookup endpoint.
 type Mapper struct {
@@ -100,7 +104,7 @@ func (m *Mapper) Lookup(ctx context.Context, artist, recording, release string) 
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 	req.Header.Set("Authorization", "Token "+m.token)
-	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("User-Agent", userAgent())
 
 	resp, err := m.httpClient.Do(req)
 	if err != nil {

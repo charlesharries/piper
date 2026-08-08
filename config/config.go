@@ -34,6 +34,10 @@ func Load() {
 	// authentication; without a token the mapper is skipped entirely.
 	viper.SetDefault("listenbrainz.token", "")
 
+	// The agent piper identifies itself with, in submitted plays and upstream
+	// User-Agent headers. Empty means models.SubmissionAgent's build default.
+	viper.SetDefault("app.submission_agent", "")
+
 	// Apple Music defaults
 	viper.SetDefault("applemusic.team_id", "")
 	viper.SetDefault("applemusic.key_id", "")
@@ -51,6 +55,7 @@ func Load() {
 	_ = viper.BindEnv("applemusic.key_id", "APPLE_MUSIC_KEY_ID")
 	_ = viper.BindEnv("applemusic.private_key_path", "APPLE_MUSIC_PRIVATE_KEY_PATH")
 	_ = viper.BindEnv("listenbrainz.token", "LISTENBRAINZ_TOKEN")
+	_ = viper.BindEnv("app.submission_agent", "SUBMISSION_AGENT")
 
 	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 

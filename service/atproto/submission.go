@@ -8,7 +8,6 @@ import (
 
 	comatproto "github.com/bluesky-social/indigo/api/atproto"
 	lexutil "github.com/bluesky-social/indigo/lex/util"
-	"github.com/spf13/viper"
 	"github.com/teal-fm/piper/api/teal"
 	"github.com/teal-fm/piper/models"
 	atprotoauth "github.com/teal-fm/piper/oauth/atproto"
@@ -98,11 +97,7 @@ func TrackToPlayRecord(track *models.Track) (*teal.AlphaFeedPlay, error) {
 		releaseDiscriminantPtr = &track.ReleaseDiscriminant
 	}
 
-	// Get submission client agent
-	submissionAgent := viper.GetString("app.submission_agent")
-	if submissionAgent == "" {
-		submissionAgent = models.SubmissionAgent
-	}
+	submissionAgent := models.SubmissionAgent()
 
 	playRecord := &teal.AlphaFeedPlay{
 		LexiconTypeID:          "fm.teal.alpha.feed.play",
