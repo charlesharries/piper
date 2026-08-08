@@ -139,7 +139,9 @@ func NewMusicBrainzService(db *db.DB, opts ...Option) *Service {
 	// Set a default cache TTL (e.g., 1 hour)
 	defaultCacheTTL := 1 * time.Hour
 
-	logger := log.New(os.Stdout, "musicbrainz: ", log.LstdFlags|log.Lmsgprefix)
+	// the main piper service writes all output to stdout, but since the cli
+	// actually outputs JSON, logs should be written to stderr so they don't conflict.
+	logger := log.New(os.Stderr, "musicbrainz: ", log.LstdFlags|log.Lmsgprefix)
 
 	s := &Service{
 		db: db,
@@ -548,6 +550,7 @@ func (s *Service) Resolve(ctx context.Context, track models.Track) (*Match, erro
 		if match, err := s.resolveViaMapper(ctx, in, track); err != nil {
 			s.logger.Printf("ListenBrainz mapper lookup failed for %q, falling back: %v", track.Name, err)
 		} else if match != nil {
+			s.logMatch(track, match)
 			return match, nil
 		}
 	}
@@ -580,13 +583,46 @@ func (s *Service) Resolve(ctx context.Context, track models.Track) (*Match, erro
 			Source:     "musicbrainz",
 			Candidates: ranked,
 		}
+		s.logMatch(track, match)
 		return match, nil
 	}
 
 	if lastErr != nil && len(allCandidates) == 0 {
 		return nil, lastErr
 	}
+	s.logNoMatch(track, allCandidates)
 	return &Match{Candidates: allCandidates}, ErrNoConfidentMatch
+}
+
+// logMatch records which recording a play was attached to and what the score
+// was built from. Matching fails quietly -- a play just ends up carrying the
+// wrong MBID -- so every accepted match leaves a trail that can be read back.
+func (s *Service) logMatch(track models.Track, match *Match) {
+	release := "<none>"
+	if match.Release != nil {
+		release = match.Release.Title
+	}
+	var reasons []string
+	if len(match.Candidates) > 0 {
+		reasons = match.Candidates[0].reasons
+	}
+	s.logger.Printf("matched %q by %q -> %q / %q (%.2f via %s) [%s]",
+		track.Name, primaryArtist(track), match.Recording.Title, release,
+		match.Score, match.Source, strings.Join(reasons, " "))
+}
+
+// logNoMatch records a rejection along with the candidate that came closest, so
+// a threshold set too high is visible rather than looking like MusicBrainz
+// simply holding nothing.
+func (s *Service) logNoMatch(track models.Track, candidates []candidate) {
+	if len(candidates) == 0 {
+		s.logger.Printf("no match for %q by %q: no candidates returned", track.Name, primaryArtist(track))
+		return
+	}
+	best := candidates[0]
+	s.logger.Printf("no confident match for %q by %q: best was %q at %.2f < %.2f [%s]",
+		track.Name, primaryArtist(track), best.recording.Title, best.score, minConfidence,
+		strings.Join(best.reasons, " "))
 }
 
 // resolveRelease picks the album to attribute a play to. When the release list
