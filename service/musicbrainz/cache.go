@@ -5,14 +5,7 @@ import (
 	"time"
 )
 
-// ttlCache is a size-capped map whose entries expire. Both the recording search
-// and the release group pressing lookups are read-mostly and want the same
-// eviction policy, so they share this rather than each hand-rolling it.
-//
-// The TTL is given per put rather than fixed on the cache: how long a result
-// stays good is a property of the result, not of the cache holding it, and
-// keeping it at the call site is what makes the short TTL on empty search
-// results visible where the decision is made.
+// ttlCache is an in-memory cache for expensive responses to the MusicBrainz API.
 type ttlCache[V any] struct {
 	mu      sync.RWMutex
 	entries map[string]ttlEntry[V]
@@ -48,8 +41,8 @@ func (c *ttlCache[V]) get(key string) (V, bool) {
 	}
 
 	c.mu.Lock()
-	// Re-check under the write lock: another goroutine may have refreshed the
-	// entry since the read above.
+	// Re-check under the write lock before deleting, in case another goroutine updated
+	// the entry in the like six lines since unlocking.
 	if entry, found := c.entries[key]; found && !time.Now().UTC().Before(entry.expiresAt) {
 		delete(c.entries, key)
 	}
@@ -64,14 +57,17 @@ func (c *ttlCache[V]) put(key string, value V, ttl time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Opportunistically sweep expired entries so the cache doesn't grow unbounded.
+	// If .get() is never called on expired entries, they'll never get
+	// deleted from the cache -- so good to take the opportunity afforded
+	// by the lock to do a lil housekeeping.
 	for key, entry := range c.entries {
 		if !now.Before(entry.expiresAt) {
 			delete(c.entries, key)
 		}
 	}
 
-	// Still full after sweeping: evict whatever is closest to expiring anyway.
+	// Still full after housekeeping? Evict whatever is closest to expiring
+	// to make space for this entry.
 	if len(c.entries) >= c.maxSize {
 		var oldestKey string
 		var oldestExpiry time.Time

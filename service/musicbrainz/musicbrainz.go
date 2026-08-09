@@ -107,9 +107,9 @@ type Service struct {
 	httpClient *http.Client
 	limiter    *rate.Limiter
 	mapper     Mapper
-	cacheTTL   time.Duration   // Time-to-live for cache entries
-	cleaner    MetadataCleaner // Cleaner for cleaning up expired cache entries
-	logger     *log.Logger     // Logger for logging
+	cacheTTL   time.Duration
+	cleaner    MetadataCleaner
+	logger     *log.Logger
 
 	// searchCache holds search and recording lookup results, keyed by endpoint.
 	searchCache *ttlCache[[]Recording]
@@ -136,6 +136,7 @@ func WithHTTPClient(c *http.Client) Option {
 func NewMusicBrainzService(db *db.DB, opts ...Option) *Service {
 	// MusicBrainz allows 1 request per second
 	limiter := rate.NewLimiter(rate.Every(time.Second), 1)
+
 	// Set a default cache TTL (e.g., 1 hour)
 	defaultCacheTTL := 1 * time.Hour
 
