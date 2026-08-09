@@ -1,71 +1,38 @@
-# Evaluation set for the MusicBrainz matcher.
-#
-#   go run ./cmd/musicbrainz-cli -batch cmd/musicbrainz-cli/testdata/golden.jsonl
-#
-# Each row is the metadata a music service would hand over, paired with what the
-# matcher should arrive at. Fields mirror models.Track; separate collaborating
-# artists with ';'.
-#
-# Prefer expect_recording_title over expect_recording_mbid unless the case is
-# ISRC-backed: MusicBrainz holds a separate recording entry per compilation
-# appearance for older tracks, so several MBIDs are equally correct. What the
-# assertion needs to catch is landing on an outtake, a live take, a karaoke
-# version or a random compilation. For the same reason releases are asserted by
-# title -- an album has dozens of equally correct pressings.
-#
-# Durations are what Spotify/Apple Music report, and are load-bearing: they are
-# frequently the only signal separating candidates MusicBrainz returns at
-# identical query scores.
-
-# --- ISRC-backed: these should resolve exactly, via the cheapest path ---
 {"name":"Bohemian Rhapsody","artist":"Queen","album":"A Night at the Opera (2011 Remaster)","isrc":"GBUM71029604","duration_ms":355106,"note":"isrc + remaster suffix","expect_recording_mbid":"b1a9c0e9-d987-4042-ae91-78d6a3267d69","expect_release_title":"A Night at the Opera"}
 {"name":"Loser","artist":"Tame Impala","album":"Deadbeat","isrc":"USQX92505503","duration_ms":223070,"note":"isrc, from local history","expect_recording_mbid":"ec87b2e6-3d7e-4121-96a3-051fe779de6f","expect_release_title":"Deadbeat"}
 
-# --- The outtake trap: MusicBrainz ranks "Dreams (outtake)" above the real one ---
 {"name":"Dreams","artist":"Fleetwood Mac","album":"Rumours (Super Deluxe)","duration_ms":257800,"note":"outtake trap + deluxe suffix","expect_recording_title":"Dreams","expect_release_title":"Rumours"}
 {"name":"Dreams - 2004 Remaster","artist":"Fleetwood Mac","album":"Rumours","duration_ms":257800,"note":"remaster suffix on the track","expect_recording_title":"Dreams","expect_release_title":"Rumours"}
 {"name":"Go Your Own Way","artist":"Fleetwood Mac","album":"Rumours","duration_ms":223000,"note":"same album, plain","expect_recording_title":"Go Your Own Way","expect_release_title":"Rumours"}
 
-# --- Release group title differs from release title ---
 {"name":"Blue Monday","artist":"New Order","album":"Power, Corruption & Lies","duration_ms":450000,"note":"release titled 'Power Corruption and Lies'","expect_recording_title":"Blue Monday","expect_release_title":"Power, Corruption & Lies"}
 {"name":"Age of Consent","artist":"New Order","album":"Power, Corruption & Lies","duration_ms":304000,"note":"ampersand + comma in album","expect_recording_title":"Age of Consent","expect_release_title":"Power, Corruption & Lies"}
 
-# --- Compilation gravity: every top hit is a compilation appearance ---
 {"name":"I Can See Clearly Now","artist":"Jimmy Cliff","album":"Cool Runnings: Music From The Motion Picture","duration_ms":197000,"note":"local history regressed to a junk compilation","expect_recording_title":"I Can See Clearly Now","expect_release_title":"Cool Runnings: Music From the Motion Picture"}
 
-# --- Soundtracks: the old code filtered every secondary type out entirely ---
 {"name":"Hooked on a Feeling","artist":"Blue Swede","album":"Guardians of the Galaxy: Awesome Mix Vol. 1","duration_ms":173000,"note":"soundtrack","expect_recording_title":"Hooked on a Feeling","expect_release_title":"Guardians of the Galaxy: Awesome Mix, Vol. 1"}
 {"name":"Come and Get Your Love","artist":"Redbone","album":"Guardians of the Galaxy: Awesome Mix Vol. 1","duration_ms":214000,"note":"soundtrack","expect_recording_title":"Come and Get Your Love","expect_release_title":"Guardians of the Galaxy: Awesome Mix, Vol. 1"}
 
-# --- Genuine compilations: must still be allowed to win ---
 {"name":"Don't Stop Me Now","artist":"Queen","album":"Greatest Hits","duration_ms":209000,"note":"the album really is a compilation","expect_recording_title":"Don't Stop Me Now","expect_release_title":"Greatest Hits"}
 
-# --- Collaborations: the cleaner truncates artists at the first comma ---
 {"name":"One Kiss","artist":"Calvin Harris;Dua Lipa","album":"One Kiss","duration_ms":214846,"note":"two credited artists","expect_recording_title":"One Kiss","expect_release_title":"One Kiss"}
-# MusicBrainz carries the censored title as its own recording, so matching it is
-# correct; only the release is asserted here.
 {"name":"Ni**as In Paris","artist":"JAY-Z;Kanye West","album":"Watch The Throne","duration_ms":219333,"note":"censored title + collab","expect_release_title":"Watch the Throne"}
 
-# --- feat. suffixes ---
 {"name":"Stay (feat. Bryan Adams)","artist":"The Kid LAROI;Justin Bieber","album":"F*CK LOVE 3: OVER YOU","duration_ms":141805,"note":"feat suffix that is not on the MB title","expect_recording_title":"Stay"}
 {"name":"Empire State of Mind (feat. Alicia Keys)","artist":"JAY-Z","album":"The Blueprint 3","duration_ms":276600,"note":"feat suffix","expect_recording_title":"Empire State of Mind","expect_release_title":"The Blueprint 3"}
 
-# --- Live albums: a live recording is right when the album is live ---
 {"name":"Whole Lotta Love","artist":"Led Zeppelin","album":"How the West Was Won","duration_ms":1400000,"note":"live album, live recording is correct","expect_release_title":"How the West Was Won"}
 {"name":"Whole Lotta Love","artist":"Led Zeppelin","album":"Led Zeppelin II","duration_ms":333000,"note":"studio album must not get the live take","expect_recording_title":"Whole Lotta Love","expect_release_title":"Led Zeppelin II"}
 
-# --- Non-Latin script: the cleaner drops it entirely, so the raw retry matters ---
 {"name":"シェリー","artist":"尾崎豊","album":"回帰線","duration_ms":304000,"note":"japanese title and artist","expect_recording_title":"シェリー","expect_release_title":"回帰線"}
 {"name":"Плот","artist":"Юрий Лоза","album":"Что сказано, то сказано","duration_ms":286000,"note":"cyrillic title and artist","expect_recording_title":"Плот"}
 
-# --- Punctuation that breaks unescaped Lucene queries ---
 {"name":"Say \"Yes\"","artist":"Floetry","album":"Floetic","duration_ms":260000,"note":"double quotes in the title","expect_release_title":"Floetic"}
 {"name":"'Till I Collapse","artist":"Eminem","album":"The Eminem Show","duration_ms":297786,"note":"leading apostrophe","expect_recording_title":"'Till I Collapse","expect_release_title":"The Eminem Show"}
 
-# --- Classical: artist credit is the composer or the performer, rarely both ---
 {"name":"The Four Seasons, Violin Concerto in E Major, RV 269 \"Spring\": I. Allegro","artist":"Antonio Vivaldi","album":"Vivaldi: The Four Seasons","duration_ms":205000,"note":"classical, long structured title"}
 
-# --- Must be rejected rather than matched to the least-bad candidate ---
 {"name":"asdfgh","artist":"qwerty","album":"zxcvbn","note":"nonsense","expect_no_match":true}
 {"name":"","artist":"","album":"","note":"empty input","expect_no_match":true}
+
 {"name": "Stability", "artist": "Death Cab for Cutie", "album": "The Stability EP", "duration_ms": 741000, "note": "EP track catalogued as a medley", "expect_release_title": "The Stability EP"}
