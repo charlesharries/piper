@@ -83,33 +83,33 @@ const maxSearchCacheEntries = 1000
 // negativeCacheTTL is how long an empty result is remembered for.
 const negativeCacheTTL = 5 * time.Minute
 
-// MapperResult is an external matching service's answer for a play.
+// ListenBrainzResult is ListenBrainz's answer for a play.
 //
-// Only the recording is taken on the mapper's word. Its release and artist ids
-// are deliberately not carried: the recording is looked up against MusicBrainz
-// anyway, and the release is re-derived from that, so accepting the mapper's
-// would mean two sources of truth for the same field.
-type MapperResult struct {
+// Only the recording is taken on ListenBrainz's word. Its release and artist
+// ids are deliberately not carried: the recording is looked up against
+// MusicBrainz anyway, and the release is re-derived from that, so accepting
+// ListenBrainz's would mean two sources of truth for the same field.
+type ListenBrainzResult struct {
 	RecordingMBID string
 	// CAAReleaseMBID is a release the Cover Art Archive is known to hold art
 	// for, which makes it a good release to attribute the play to.
 	CAAReleaseMBID string
 }
 
-// Mapper resolves a play to MusicBrainz identifiers using a dedicated matching
-// service. It is optional: when absent, resolution falls back to search.
-type Mapper interface {
-	Lookup(ctx context.Context, artist, recording, release string) (*MapperResult, error)
+// ListenBrainzClient resolves a play to MusicBrainz identifiers via
+// ListenBrainz. It is optional: when absent, resolution falls back to search.
+type ListenBrainzClient interface {
+	Lookup(ctx context.Context, artist, recording, release string) (*ListenBrainzResult, error)
 }
 
 type Service struct {
-	db         *db.DB
-	httpClient *http.Client
-	limiter    *rate.Limiter
-	mapper     Mapper
-	cacheTTL   time.Duration
-	cleaner    MetadataCleaner
-	logger     *log.Logger
+	db           *db.DB
+	httpClient   *http.Client
+	limiter      *rate.Limiter
+	listenbrainz ListenBrainzClient
+	cacheTTL     time.Duration
+	cleaner      MetadataCleaner
+	logger       *log.Logger
 
 	// searchCache holds search and recording lookup results, keyed by endpoint.
 	searchCache *ttlCache[[]Recording]
@@ -121,9 +121,9 @@ type Service struct {
 // Option configures a Service after construction.
 type Option func(*Service)
 
-// WithMapper enables an external matching service as the first-choice backend.
-func WithMapper(m Mapper) Option {
-	return func(s *Service) { s.mapper = m }
+// WithListenBrainz enables ListenBrainz as the first-choice backend.
+func WithListenBrainz(lb ListenBrainzClient) Option {
+	return func(s *Service) { s.listenbrainz = lb }
 }
 
 // WithHTTPClient replaces the HTTP client, so tests can serve canned responses
@@ -162,11 +162,11 @@ func NewMusicBrainzService(db *db.DB, opts ...Option) *Service {
 	return s
 }
 
-// resolveViaMapper asks the external matcher (here, listenbrainz) for an answer
-// and verifies it against MusicBrainz before accepting. Mappers can be confidently
-// wrong, so the same scoring that guards search results guards these too.
-func (s *Service) resolveViaMapper(ctx context.Context, in matchInput, track models.Track) (*Match, error) {
-	res, err := s.mapper.Lookup(ctx, primaryArtist(track), track.Name, track.Album)
+// resolveViaListenBrainz asks ListenBrainz for an answer and verifies it against
+// MusicBrainz before accepting. ListenBrainz can be confidently wrong, so the
+// same scoring that guards search results guards its answers too.
+func (s *Service) resolveViaListenBrainz(ctx context.Context, in matchInput, track models.Track) (*Match, error) {
+	res, err := s.listenbrainz.Lookup(ctx, primaryArtist(track), track.Name, track.Album)
 	if err != nil {
 		return nil, err
 	}
@@ -548,27 +548,27 @@ var ErrNoConfidentMatch = errors.New("no confident MusicBrainz match")
 func (s *Service) Resolve(ctx context.Context, track models.Track) (*Match, error) {
 	in := newMatchInput(track)
 
-	// The ListenBrainz mapper is purpose-built for this and beats raw search on
-	// messy input, but it needs a token, so it is optional.
-	var mapped *Match
-	if s.mapper != nil {
-		match, err := s.resolveViaMapper(ctx, in, track)
+	// ListenBrainz is purpose-built for this and beats raw search on messy
+	// input, but it needs a token, so it is optional.
+	var lbMatch *Match
+	if s.listenbrainz != nil {
+		match, err := s.resolveViaListenBrainz(ctx, in, track)
 		if err != nil {
-			s.logger.Printf("ListenBrainz mapper lookup failed for %q, falling back: %v", track.Name, err)
+			s.logger.Printf("ListenBrainz lookup failed for %q, falling back: %v", track.Name, err)
 		}
-		mapped = match
+		lbMatch = match
 	}
-	// A mapper answer beat no alternatives, so clearing minConfidence says less
+	// A ListenBrainz answer beat no alternatives, so clearing minConfidence says less
 	// about it than the same score would for a ranked search result. Accept it
 	// outright only when nothing about it looks doubtful; otherwise keep it as
 	// the incumbent and let search offer something better.
-	if mapped != nil && !in.albumDisagrees(mapped.Recording) {
-		s.logMatch(track, mapped)
-		return mapped, nil
+	if lbMatch != nil && !in.albumDisagrees(lbMatch.Recording) {
+		s.logMatch(track, lbMatch)
+		return lbMatch, nil
 	}
-	if mapped != nil {
+	if lbMatch != nil {
 		s.logger.Printf("second opinion on %q: %q is not on %q, searching",
-			track.Name, mapped.Recording.Title, track.Album)
+			track.Name, lbMatch.Recording.Title, track.Album)
 	}
 
 	var allCandidates []candidate
@@ -591,11 +591,11 @@ func (s *Service) Resolve(ctx context.Context, track models.Track) (*Match, erro
 		}
 
 		best := ranked[0]
-		// The mapper's answer was doubted, not discarded; it still wins if
+		// ListenBrainz's answer was doubted, not discarded; it still wins if
 		// search cannot do better.
-		if mapped != nil && mapped.Score >= best.score {
-			s.logMatch(track, mapped)
-			return mapped, nil
+		if lbMatch != nil && lbMatch.Score >= best.score {
+			s.logMatch(track, lbMatch)
+			return lbMatch, nil
 		}
 
 		release := s.resolveRelease(ctx, in, best.recording, nil)
@@ -610,9 +610,9 @@ func (s *Service) Resolve(ctx context.Context, track models.Track) (*Match, erro
 		return match, nil
 	}
 
-	if mapped != nil {
-		s.logMatch(track, mapped)
-		return mapped, nil
+	if lbMatch != nil {
+		s.logMatch(track, lbMatch)
+		return lbMatch, nil
 	}
 	if lastErr != nil && len(allCandidates) == 0 {
 		return nil, lastErr

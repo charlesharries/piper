@@ -49,7 +49,7 @@ func TestCleanRecording(t *testing.T) {
 		{name: "remaster suffix", in: "Dreams - 2004 Remaster", want: "Dreams"},
 		{name: "feat suffix", in: "Stay (feat. Bryan Adams)", want: "Stay"},
 		{name: "radio edit", in: "One Kiss (Radio Edit)", want: "One Kiss"},
-		{name: "meaningful parenthetical survives", in: "Everlong (Acoustic)", want: "Everlong"},
+		{name: "meaningful parenthetical survives", in: "Respect (Just A Little Bit)", want: "Respect (Just A Little Bit)"},
 		{name: "unbalanced brackets are left alone", in: "Dreams (outtake", want: "Dreams (outtake"},
 		{name: "non-latin title survives", in: "シェリー", want: "シェリー"},
 	}

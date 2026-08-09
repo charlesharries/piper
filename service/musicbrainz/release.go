@@ -37,7 +37,7 @@ var preferredCountries = map[string]bool{"XW": true, "US": true, "GB": true, "XE
 
 // scoreRelease rates one release as the album to attribute a play to.
 // artOwners, when non-empty, is the set of release MBIDs already known to have
-// cover art (currently supplied by the ListenBrainz mapper).
+// cover art (currently supplied by ListenBrainz).
 func scoreRelease(in matchInput, r Release, trackTitle string, artOwners map[string]bool) (float64, []string) {
 	var weighted, total float64
 	reasons := make([]string, 0, 5)

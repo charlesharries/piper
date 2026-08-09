@@ -97,13 +97,13 @@ func main() {
 		log.Fatalf("Error creating ATproto auth service: %v", err)
 	}
 
-	// The ListenBrainz mapper resolves plays more reliably than MusicBrainz
-	// search, but its endpoint needs a token. Without one, NewMapper returns nil
-	// and lookups fall back to searching MusicBrainz directly.
+	// ListenBrainz resolves plays more reliably than MusicBrainz search, but its
+	// endpoint needs a token. Without one, NewClient returns nil and lookups
+	// fall back to searching MusicBrainz directly.
 	var mbOptions []musicbrainz.Option
-	if mapper := listenbrainz.NewMapper(viper.GetString("listenbrainz.token")); mapper != nil {
-		log.Println("ListenBrainz MBID mapper enabled")
-		mbOptions = append(mbOptions, musicbrainz.WithMapper(mapper))
+	if lb := listenbrainz.NewClient(viper.GetString("listenbrainz.token")); lb != nil {
+		log.Println("ListenBrainz lookup enabled")
+		mbOptions = append(mbOptions, musicbrainz.WithListenBrainz(lb))
 	}
 
 	mbService := musicbrainz.NewMusicBrainzService(database, mbOptions...)

@@ -1,5 +1,5 @@
-// Package listenbrainz talks to ListenBrainz's MBID mapper, which resolves
-// loose artist/track/release names to MusicBrainz identifiers. It is a
+// Package listenbrainz talks to ListenBrainz's metadata lookup endpoint, which
+// resolves loose artist/track/release names to MusicBrainz identifiers. It is a
 // purpose-built matcher and copes with the decorated metadata streaming
 // services emit far better than raw MusicBrainz search does.
 package listenbrainz
@@ -28,30 +28,30 @@ func userAgent() string {
 	return models.SubmissionAgent() + " ( https://github.com/teal-fm/piper )"
 }
 
-// Mapper is a client for the ListenBrainz metadata lookup endpoint.
-type Mapper struct {
+// Client calls the ListenBrainz metadata lookup endpoint.
+type Client struct {
 	token      string
 	httpClient *http.Client
 	limiter    *rate.Limiter
 }
 
-// Option configures a Mapper.
-type Option func(*Mapper)
+// Option configures a Client.
+type Option func(*Client)
 
 // WithHTTPClient replaces the HTTP client, so tests can serve canned responses.
 func WithHTTPClient(c *http.Client) Option {
-	return func(m *Mapper) { m.httpClient = c }
+	return func(lb *Client) { lb.httpClient = c }
 }
 
-// NewMapper builds a mapper for the given user token. The endpoint requires
-// authentication, so an empty token yields a nil mapper and callers fall back
+// NewClient builds a client for the given user token. The endpoint requires
+// authentication, so an empty token yields a nil client and callers fall back
 // to searching MusicBrainz directly.
-func NewMapper(token string, opts ...Option) *Mapper {
+func NewClient(token string, opts ...Option) *Client {
 	if strings.TrimSpace(token) == "" {
 		return nil
 	}
 
-	m := &Mapper{
+	lb := &Client{
 		token:      strings.TrimSpace(token),
 		httpClient: &http.Client{Timeout: 10 * time.Second},
 		// ListenBrainz is more permissive than MusicBrainz's 1/sec, but there
@@ -59,12 +59,12 @@ func NewMapper(token string, opts ...Option) *Mapper {
 		limiter: rate.NewLimiter(rate.Every(200*time.Millisecond), 4),
 	}
 	for _, opt := range opts {
-		opt(m)
+		opt(lb)
 	}
-	return m
+	return lb
 }
 
-// lookupResponse is the subset of the mapper's reply that piper uses. The reply
+// lookupResponse is the subset of ListenBrainz's reply that piper uses. The reply
 // also carries release and artist ids, which are ignored: piper re-derives both
 // from the recording it looks up.
 type lookupResponse struct {
@@ -79,7 +79,7 @@ type lookupResponse struct {
 
 // Lookup resolves a play to MusicBrainz identifiers. A miss is reported as a
 // nil result with a nil error, since not matching is an ordinary outcome.
-func (m *Mapper) Lookup(ctx context.Context, artist, recording, release string) (*musicbrainz.MapperResult, error) {
+func (lb *Client) Lookup(ctx context.Context, artist, recording, release string) (*musicbrainz.ListenBrainzResult, error) {
 	if strings.TrimSpace(artist) == "" || strings.TrimSpace(recording) == "" {
 		return nil, nil
 	}
@@ -95,7 +95,7 @@ func (m *Mapper) Lookup(ctx context.Context, artist, recording, release string) 
 	query.Set("metadata", "true")
 	query.Set("inc", "release")
 
-	if err := m.limiter.Wait(ctx); err != nil {
+	if err := lb.limiter.Wait(ctx); err != nil {
 		return nil, fmt.Errorf("rate limiter error: %w", err)
 	}
 
@@ -103,10 +103,10 @@ func (m *Mapper) Lookup(ctx context.Context, artist, recording, release string) 
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
-	req.Header.Set("Authorization", "Token "+m.token)
+	req.Header.Set("Authorization", "Token "+lb.token)
 	req.Header.Set("User-Agent", userAgent())
 
-	resp, err := m.httpClient.Do(req)
+	resp, err := lb.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute lookup: %w", err)
 	}
@@ -126,7 +126,7 @@ func (m *Mapper) Lookup(ctx context.Context, artist, recording, release string) 
 		return nil, nil
 	}
 
-	result := &musicbrainz.MapperResult{RecordingMBID: parsed.RecordingMBID}
+	result := &musicbrainz.ListenBrainzResult{RecordingMBID: parsed.RecordingMBID}
 	if md := parsed.Metadata; md != nil && md.Release != nil && md.Release.CAAID != nil {
 		result.CAAReleaseMBID = md.Release.CAAReleaseMBID
 	}

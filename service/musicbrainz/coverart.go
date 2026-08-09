@@ -10,31 +10,20 @@ import (
 	"time"
 )
 
-// The Cover Art Archive is keyed on releases, never on recordings, and
-// fm.teal.alpha.feed.play carries no release-group field. That leaves
-// releaseMbId as the only identifier in a play record a consumer can turn into
-// artwork, which makes choosing a pressing a publishing decision rather than
-// only a metadata one.
-//
-// Art is uploaded per pressing and plenty of pressings have none: of the 82
-// releases of Rumours, 19 carry no front cover, and picking on metadata grounds
-// alone lands on one of those often enough to matter. Preferring a pressing the
-// archive actually holds art for is what makes the stored MBID resolve to an
-// image for whoever reads the record.
+// The Cover Art Archive is keyed on releases, so it's important to get the
+// releaseMbId right when publishing a new play. Not just that the release
+// matches what the user's client has reported, but that the release has some
+// cover art to show on your sick AppView.
 
-// browseReleasesLimit is the page size for the release browse. Release groups
-// with more pressings than this exist, but the first page is a large enough
-// pool to find one with artwork.
+// browseReleasesLimit is the page size for the release browse. 100 items
+// should be more than enough to find a release with artwork.
 const browseReleasesLimit = 100
 
-// coverArtTimeout bounds the artwork probe. It is deliberately short: knowing
-// whether a pressing has art is a nicety, and a play must not wait on the
-// archive to be published.
+// coverArtTimeout bounds the artwork request.
 const coverArtTimeout = 3 * time.Second
 
-// buildCoverArtEndpoint addresses a release's front cover. The unsized variant
-// is asked for on purpose -- a specific thumbnail size can be missing for art
-// that does exist, which would read as "no cover".
+// buildCoverArtEndpoint addresses a release's front cover. We query for an
+// unsized version deliberately: possible that some sizes just don't exist!
 func buildCoverArtEndpoint(releaseMBID string) string {
 	return "https://coverartarchive.org/release/" + url.PathEscape(releaseMBID) + "/front"
 }
@@ -42,15 +31,13 @@ func buildCoverArtEndpoint(releaseMBID string) string {
 // hasCoverArt reports whether the Cover Art Archive holds a front cover for a
 // release.
 //
-// This exists to keep the release browse off the hot path. The browse is a
-// MusicBrainz call, and MusicBrainz allows one request per second across the
-// whole process, so paying it for every play is what makes hydration slow. The
-// archive is a different host on its own CDN, and answers the only question
-// that matters most of the time: does the pressing we already chose have art?
+// Most of the time, the releaseMbId that we've chosen has cover art. To save
+// ourselves a query to the MusicBrainz API for all releases with cover art, we
+// can first check whether the Cover Art Archive API (i.e. not the MusicBrainz
+// API, and therefore not bound by the 1 req/s rate limit!) has cover art for
+// the current release. Just do a HEAD request so it's quick!
 //
-// A redirect means yes, 404 means no, and anything else is unknown -- reported
-// as false so the caller falls back to the browse rather than trusting a
-// network blip.
+// If no cover art is found, well, then we have to go to MusicBrainz.
 func (s *Service) hasCoverArt(ctx context.Context, releaseMBID string) bool {
 	if releaseMBID == "" {
 		return false
@@ -65,9 +52,8 @@ func (s *Service) hasCoverArt(ctx context.Context, releaseMBID string) bool {
 	}
 	req.Header.Set("User-Agent", userAgent())
 
-	// The archive answers with a redirect to the image on archive.org. Following
-	// it would cost two more round trips to learn a fact the 307 already states,
-	// so stop at the first response.
+	// Don't bother following redirects -- if we're being redirected, it's
+	// because cover art exists, which is what we want to know!
 	client := *s.httpClient
 	client.CheckRedirect = func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse

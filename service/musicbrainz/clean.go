@@ -83,10 +83,10 @@ func (mc *MetadataCleaner) DropForeignChars(text string) string {
 	}
 
 	cleaned := strings.TrimSpace(b.String())
-	// Keep the original when dropping foreign characters would gut it. A title
-	// written wholly in another script leaves behind only stray punctuation and
-	// script-neutral marks -- "シェリー" reduces to "ー", which is worse than
-	// useless as a query.
+
+	// If the cleaned version has less than half of the letters of the
+	// original, and there are foreign characters present, just return
+	// the original: chances are we've got a foreign title or artist.
 	if hasForeign && cleaned != "" && keptLetters*2 >= totalLetters {
 		return cleaned
 	}

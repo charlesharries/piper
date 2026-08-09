@@ -29,9 +29,9 @@ func Load() {
 	viper.SetDefault("enable_lastfm", true)
 	viper.SetDefault("enable_applemusic", true)
 
-	// ListenBrainz's MBID mapper is used to resolve plays to MusicBrainz ids
-	// before falling back to searching MusicBrainz. Its endpoint requires
-	// authentication; without a token the mapper is skipped entirely.
+	// ListenBrainz is used to resolve plays to MusicBrainz ids before falling
+	// back to searching MusicBrainz. Its lookup endpoint requires
+	// authentication; without a token ListenBrainz is skipped entirely.
 	viper.SetDefault("listenbrainz.token", "")
 
 	// The agent piper identifies itself with, in submitted plays and upstream

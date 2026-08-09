@@ -25,22 +25,22 @@ func (s *stubTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}, nil
 }
 
-func newTestMapper(t *testing.T, status int, body string) (*Mapper, *stubTransport) {
+func newTestClient(t *testing.T, status int, body string) (*Client, *stubTransport) {
 	t.Helper()
 	transport := &stubTransport{status: status, body: body}
-	mapper := NewMapper("test-token", WithHTTPClient(&http.Client{Transport: transport}))
-	if mapper == nil {
-		t.Fatal("NewMapper returned nil for a non-empty token")
+	client := NewClient("test-token", WithHTTPClient(&http.Client{Transport: transport}))
+	if client == nil {
+		t.Fatal("NewClient returned nil for a non-empty token")
 	}
-	return mapper, transport
+	return client, transport
 }
 
-// Without a token the endpoint returns 401, so the mapper stage has to be
+// Without a token the endpoint returns 401, so the client stage has to be
 // skippable rather than a hard requirement.
-func TestNewMapperWithoutToken(t *testing.T) {
+func TestNewClientWithoutToken(t *testing.T) {
 	for _, token := range []string{"", "   "} {
-		if got := NewMapper(token); got != nil {
-			t.Errorf("NewMapper(%q) = %v, want nil", token, got)
+		if got := NewClient(token); got != nil {
+			t.Errorf("NewClient(%q) = %v, want nil", token, got)
 		}
 	}
 }
@@ -58,9 +58,9 @@ func TestLookupSuccess(t *testing.T) {
 		}
 	}`
 
-	mapper, transport := newTestMapper(t, http.StatusOK, body)
+	client, transport := newTestClient(t, http.StatusOK, body)
 
-	got, err := mapper.Lookup(context.Background(), "Queen", "Bohemian Rhapsody", "A Night at the Opera")
+	got, err := client.Lookup(context.Background(), "Queen", "Bohemian Rhapsody", "A Night at the Opera")
 	if err != nil {
 		t.Fatalf("Lookup() error = %v", err)
 	}
@@ -99,9 +99,9 @@ func TestLookupSuccess(t *testing.T) {
 // A miss comes back as an empty object, not an error, and must not be treated
 // as a failure.
 func TestLookupNoMatch(t *testing.T) {
-	mapper, _ := newTestMapper(t, http.StatusOK, `{}`)
+	client, _ := newTestClient(t, http.StatusOK, `{}`)
 
-	got, err := mapper.Lookup(context.Background(), "Nobody", "Nothing", "")
+	got, err := client.Lookup(context.Background(), "Nobody", "Nothing", "")
 	if err != nil {
 		t.Fatalf("Lookup() error = %v, want nil", err)
 	}
@@ -112,10 +112,10 @@ func TestLookupNoMatch(t *testing.T) {
 
 // Cover art ids are optional; their absence must not lose the rest of the match.
 func TestLookupWithoutCoverArt(t *testing.T) {
-	mapper, _ := newTestMapper(t, http.StatusOK,
+	client, _ := newTestClient(t, http.StatusOK,
 		`{"recording_mbid": "rec-mbid", "release_mbid": "rel-mbid"}`)
 
-	got, err := mapper.Lookup(context.Background(), "Queen", "Bohemian Rhapsody", "")
+	got, err := client.Lookup(context.Background(), "Queen", "Bohemian Rhapsody", "")
 	if err != nil {
 		t.Fatalf("Lookup() error = %v", err)
 	}
@@ -128,10 +128,10 @@ func TestLookupWithoutCoverArt(t *testing.T) {
 }
 
 func TestLookupUnauthorized(t *testing.T) {
-	mapper, _ := newTestMapper(t, http.StatusUnauthorized,
+	client, _ := newTestClient(t, http.StatusUnauthorized,
 		`{"code": 401, "error": "You need to provide an Authorization header."}`)
 
-	if _, err := mapper.Lookup(context.Background(), "Queen", "Bohemian Rhapsody", ""); err == nil {
+	if _, err := client.Lookup(context.Background(), "Queen", "Bohemian Rhapsody", ""); err == nil {
 		t.Error("Lookup() error = nil, want an error for 401")
 	}
 }
@@ -149,9 +149,9 @@ func TestLookupSkipsIncompleteInput(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mapper, transport := newTestMapper(t, http.StatusOK, `{}`)
+			client, transport := newTestClient(t, http.StatusOK, `{}`)
 
-			got, err := mapper.Lookup(context.Background(), tt.artist, tt.recording, "")
+			got, err := client.Lookup(context.Background(), tt.artist, tt.recording, "")
 			if err != nil || got != nil {
 				t.Errorf("Lookup() = (%v, %v), want (nil, nil)", got, err)
 			}
@@ -164,9 +164,9 @@ func TestLookupSkipsIncompleteInput(t *testing.T) {
 
 // The release name is optional and must be omitted rather than sent empty.
 func TestLookupOmitsEmptyRelease(t *testing.T) {
-	mapper, transport := newTestMapper(t, http.StatusOK, `{}`)
+	client, transport := newTestClient(t, http.StatusOK, `{}`)
 
-	if _, err := mapper.Lookup(context.Background(), "Queen", "Bohemian Rhapsody", ""); err != nil {
+	if _, err := client.Lookup(context.Background(), "Queen", "Bohemian Rhapsody", ""); err != nil {
 		t.Fatalf("Lookup() error = %v", err)
 	}
 
@@ -177,10 +177,10 @@ func TestLookupOmitsEmptyRelease(t *testing.T) {
 
 // Names with reserved characters have to survive the round trip intact.
 func TestLookupEscapesQueryValues(t *testing.T) {
-	mapper, transport := newTestMapper(t, http.StatusOK, `{}`)
+	client, transport := newTestClient(t, http.StatusOK, `{}`)
 
 	const recording = `Say "Yes" & No`
-	if _, err := mapper.Lookup(context.Background(), "AC/DC", recording, ""); err != nil {
+	if _, err := client.Lookup(context.Background(), "AC/DC", recording, ""); err != nil {
 		t.Fatalf("Lookup() error = %v", err)
 	}
 

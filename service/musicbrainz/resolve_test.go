@@ -212,8 +212,8 @@ func TestResolveRetriesOnServiceUnavailable(t *testing.T) {
 	}
 }
 
-// The mapper is verified against MusicBrainz, not trusted outright.
-func TestResolveRejectsBadMapperMatch(t *testing.T) {
+// ListenBrainz is verified against MusicBrainz, not trusted outright.
+func TestResolveRejectsBadListenBrainzMatch(t *testing.T) {
 	wrong := recording("Something Else Entirely", "A Different Band", 120000)
 	wrong.ID = "wrong-mbid"
 	right := recording("Dreams", "Fleetwood Mac", 257800,
@@ -223,7 +223,7 @@ func TestResolveRejectsBadMapperMatch(t *testing.T) {
 		route{match: "recording/wrong-mbid", body: mustJSON(t, wrong)},
 		route{match: "query=", body: searchBody(t, right)},
 	)
-	svc.mapper = stubMapper{result: &MapperResult{RecordingMBID: "wrong-mbid"}}
+	svc.listenbrainz = stubListenBrainz{result: &ListenBrainzResult{RecordingMBID: "wrong-mbid"}}
 
 	play := models.Track{
 		Name:       "Dreams",
@@ -244,13 +244,13 @@ func TestResolveRejectsBadMapperMatch(t *testing.T) {
 	}
 }
 
-func TestResolveUsesMapperWhenItAgrees(t *testing.T) {
+func TestResolveUsesListenBrainzWhenItAgrees(t *testing.T) {
 	rec := recording("Dreams", "Fleetwood Mac", 257800,
 		release("Rumours", "Rumours", "1977-02-04", "US"))
 	rec.ID = "good-mbid"
 
 	svc, transport := newTestService(t, route{match: "recording/good-mbid", body: mustJSON(t, rec)})
-	svc.mapper = stubMapper{result: &MapperResult{RecordingMBID: "good-mbid"}}
+	svc.listenbrainz = stubListenBrainz{result: &ListenBrainzResult{RecordingMBID: "good-mbid"}}
 
 	match, err := svc.Resolve(context.Background(), models.Track{
 		Name:       "Dreams",
@@ -266,18 +266,18 @@ func TestResolveUsesMapperWhenItAgrees(t *testing.T) {
 	}
 	for _, url := range transport.requested {
 		if strings.Contains(url, "query=") {
-			t.Errorf("searched despite a good mapper match: %v", transport.requested)
+			t.Errorf("searched despite a good ListenBrainz match: %v", transport.requested)
 		}
 	}
 }
 
-// A mapper failure must not take the whole lookup down.
-func TestResolveSurvivesMapperError(t *testing.T) {
+// A ListenBrainz failure must not take the whole lookup down.
+func TestResolveSurvivesListenBrainzError(t *testing.T) {
 	rec := recording("Dreams", "Fleetwood Mac", 257800,
 		release("Rumours", "Rumours", "1977-02-04", "US"))
 
 	svc, _ := newTestService(t, route{match: "query=", body: searchBody(t, rec)})
-	svc.mapper = stubMapper{err: errors.New("listenbrainz is down")}
+	svc.listenbrainz = stubListenBrainz{err: errors.New("listenbrainz is down")}
 
 	match, err := svc.Resolve(context.Background(), models.Track{
 		Name:       "Dreams",
@@ -293,12 +293,12 @@ func TestResolveSurvivesMapperError(t *testing.T) {
 	}
 }
 
-type stubMapper struct {
-	result *MapperResult
+type stubListenBrainz struct {
+	result *ListenBrainzResult
 	err    error
 }
 
-func (s stubMapper) Lookup(context.Context, string, string, string) (*MapperResult, error) {
+func (s stubListenBrainz) Lookup(context.Context, string, string, string) (*ListenBrainzResult, error) {
 	return s.result, s.err
 }
 
@@ -416,12 +416,12 @@ func TestHydrateTrackErrorsWithoutConfidentMatch(t *testing.T) {
 	}
 }
 
-// A mapper's answer beat no alternatives, so a recording that cannot be
+// A ListenBrainz answer beat no alternatives, so a recording that cannot be
 // attributed to the album the play named has to be checked against search.
 // Death Cab's "Stability" was resolved to The Photo Album this way: ListenBrainz
 // named the reissue's recording, which scores perfectly on title and duration
 // and only disagrees on the album.
-func TestResolveDoubtsMapperWhenAlbumDisagrees(t *testing.T) {
+func TestResolveDoubtsListenBrainzWhenAlbumDisagrees(t *testing.T) {
 	photoAlbum := release("The Photo Album", "The Photo Album", "2001-10-09", "US")
 	wrong := recording("Stability", "Death Cab for Cutie", 740864, photoAlbum)
 	wrong.ID = "photo-album-mbid"
@@ -434,14 +434,14 @@ func TestResolveDoubtsMapperWhenAlbumDisagrees(t *testing.T) {
 		route{match: "recording/photo-album-mbid", body: mustJSON(t, wrong)},
 		route{match: "/ws/2/recording?", body: searchBody(t, right)},
 	)
-	svc.mapper = stubMapper{result: &MapperResult{RecordingMBID: "photo-album-mbid"}}
+	svc.listenbrainz = stubListenBrainz{result: &ListenBrainzResult{RecordingMBID: "photo-album-mbid"}}
 
 	match, err := svc.Resolve(context.Background(), stability())
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
 	if match.Source != "musicbrainz" {
-		t.Errorf("source = %q, want search to have overruled the mapper", match.Source)
+		t.Errorf("source = %q, want search to have overruled ListenBrainz", match.Source)
 	}
 	if match.Release == nil || match.Release.Title != "The Stability EP" {
 		t.Errorf("release = %v, want The Stability EP", match.Release)
@@ -451,31 +451,31 @@ func TestResolveDoubtsMapperWhenAlbumDisagrees(t *testing.T) {
 	}
 }
 
-// The doubt must not cost a search when the mapper's answer sits on the album
-// the play named -- that is the whole point of having a mapper.
-func TestResolveTrustsMapperWhenAlbumAgrees(t *testing.T) {
+// The doubt must not cost a search when ListenBrainz's answer sits on the album
+// the play named -- that is the whole point of having ListenBrainz.
+func TestResolveTrustsListenBrainzWhenAlbumAgrees(t *testing.T) {
 	stabilityEP := release("The Stability EP", "The Stability EP", "2002-03-05", "US")
 	rec := recording("Stability", "Death Cab for Cutie", 741000, stabilityEP)
 	rec.ID = "good-mbid"
 
 	svc, transport := newTestService(t, route{match: "recording/good-mbid", body: mustJSON(t, rec)})
-	svc.mapper = stubMapper{result: &MapperResult{RecordingMBID: "good-mbid"}}
+	svc.listenbrainz = stubListenBrainz{result: &ListenBrainzResult{RecordingMBID: "good-mbid"}}
 
 	match, err := svc.Resolve(context.Background(), stability())
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
 	if match.Source != "listenbrainz" {
-		t.Errorf("source = %q, want the mapper's answer taken as-is", match.Source)
+		t.Errorf("source = %q, want ListenBrainz's answer taken as-is", match.Source)
 	}
 	if searches := transport.searches(); len(searches) != 0 {
-		t.Errorf("searched despite the mapper agreeing on the album: %v", searches)
+		t.Errorf("searched despite ListenBrainz agreeing on the album: %v", searches)
 	}
 }
 
-// Doubted is not discarded: when search offers nothing better, the mapper's
+// Doubted is not discarded: when search offers nothing better, ListenBrainz's
 // answer still stands rather than the play going unhydrated.
-func TestResolveKeepsMapperWhenSearchCannotBeatIt(t *testing.T) {
+func TestResolveKeepsListenBrainzWhenSearchCannotBeatIt(t *testing.T) {
 	photoAlbum := release("The Photo Album", "The Photo Album", "2001-10-09", "US")
 	rec := recording("Stability", "Death Cab for Cutie", 740864, photoAlbum)
 	rec.ID = "photo-album-mbid"
@@ -484,14 +484,14 @@ func TestResolveKeepsMapperWhenSearchCannotBeatIt(t *testing.T) {
 		route{match: "recording/photo-album-mbid", body: mustJSON(t, rec)},
 		route{match: "/ws/2/recording?", body: `{"count":0,"recordings":[]}`},
 	)
-	svc.mapper = stubMapper{result: &MapperResult{RecordingMBID: "photo-album-mbid"}}
+	svc.listenbrainz = stubListenBrainz{result: &ListenBrainzResult{RecordingMBID: "photo-album-mbid"}}
 
 	match, err := svc.Resolve(context.Background(), stability())
 	if err != nil {
-		t.Fatalf("Resolve() error = %v, want the mapper's answer to stand", err)
+		t.Fatalf("Resolve() error = %v, want ListenBrainz's answer to stand", err)
 	}
 	if match.Source != "listenbrainz" || match.Recording.ID != "photo-album-mbid" {
-		t.Errorf("match = %q via %s, want the mapper's answer kept", match.Recording.Title, match.Source)
+		t.Errorf("match = %q via %s, want ListenBrainz's answer kept", match.Recording.Title, match.Source)
 	}
 }
 

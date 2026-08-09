@@ -78,7 +78,7 @@ func main() {
 	flag.Parse()
 	config.Load()
 
-	service := musicbrainz.NewMusicBrainzService(nil, mapperOption()...)
+	service := musicbrainz.NewMusicBrainzService(nil, listenBrainzOption()...)
 
 	if *batch != "" {
 		if err := runBatch(service, *batch, *explain); err != nil {
@@ -107,15 +107,15 @@ func main() {
 	}
 }
 
-// mapperOption enables the ListenBrainz mapper when a token is available, so
-// the CLI evaluates the same pipeline the service runs.
-func mapperOption() []musicbrainz.Option {
-	mapper := listenbrainz.NewMapper(viper.GetString("listenbrainz.token"))
-	if mapper == nil {
+// listenBrainzOption enables ListenBrainz when a token is available, so the CLI
+// evaluates the same pipeline the service runs.
+func listenBrainzOption() []musicbrainz.Option {
+	lb := listenbrainz.NewClient(viper.GetString("listenbrainz.token"))
+	if lb == nil {
 		return nil
 	}
-	fmt.Fprintln(os.Stderr, "using ListenBrainz mapper")
-	return []musicbrainz.Option{musicbrainz.WithMapper(mapper)}
+	fmt.Fprintln(os.Stderr, "using ListenBrainz")
+	return []musicbrainz.Option{musicbrainz.WithListenBrainz(lb)}
 }
 
 type tally struct {

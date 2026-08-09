@@ -56,7 +56,7 @@ You now have to bring your own private key to run piper. Can do this via goat `g
 
 - `LASTFM_API_KEY` - Your lastfm api key. Can find out how to setup [here](https://www.last.fm/api)
 
-- `LISTENBRAINZ_TOKEN` - Optional. A ListenBrainz user token from [your profile](https://listenbrainz.org/profile/). When set, piper resolves plays to MusicBrainz IDs using ListenBrainz's MBID mapper before falling back to searching MusicBrainz, which matches messy metadata from streaming services more reliably. Piper works without it.
+- `LISTENBRAINZ_TOKEN` - Optional. A ListenBrainz user token from [your profile](https://listenbrainz.org/profile/). When set, piper resolves plays to MusicBrainz IDs using ListenBrainz's metadata lookup before falling back to searching MusicBrainz, which matches messy metadata from streaming services more reliably. Piper works without it.
 
 - `SUBMISSION_AGENT` - Optional. How piper identifies itself, both in the `submissionClientAgent` field of submitted plays and in the User-Agent it sends to MusicBrainz and ListenBrainz. Format is `<app-identifier>/<version>`, e.g. `piper/v0.0.7`. Defaults to this build's own version, so set it if you are running a fork or a repackaged build.
 

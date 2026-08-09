@@ -315,9 +315,9 @@ func (in matchInput) albumScore(releases []Release, trackTitle string) float64 {
 const albumAgreement = 0.8
 
 // albumDisagrees reports whether a recording contradicts the album the music
-// service named. It is the check a mapper's answer has to pass that a ranked
+// service named. It is the check ListenBrainz's answer has to pass that a ranked
 // search result does not need: a search winner already beat every alternative
-// on this signal, where a mapper's answer was never compared to anything.
+// on this signal, where ListenBrainz's answer was never compared to anything.
 //
 // Silent when the play named no album, or when the recording carries no
 // releases to judge -- neither is evidence against it.
