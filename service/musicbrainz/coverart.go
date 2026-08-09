@@ -2,6 +2,7 @@ package musicbrainz
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -171,16 +172,34 @@ func (s *Service) preferReleaseWithArt(ctx context.Context, in matchInput, rec R
 	}
 
 	found := s.releaseGroupPressings(ctx, release.ReleaseGroup.ID)
-	if len(found.artOwners) == 0 || found.artOwners[release.ID] {
+	if len(found.releases) == 0 {
+		return release
+	}
+	if found.artOwners[release.ID] {
+		return release
+	}
+	if len(found.artOwners) == 0 {
+		s.logger.Printf("no cover art for release %s (%s) or any of the %s in its release group",
+			release.ID, release.Title, pressingCount(len(found.releases)))
 		return release
 	}
 
 	better, _, reasons := bestRelease(in, found.releases, rec.Title, found.artOwners)
 	if better == nil || !found.artOwners[better.ID] {
+		s.logger.Printf("keeping release %s (%s) without cover art: none of the %s that have some scored better",
+			release.ID, release.Title, pressingCount(len(found.artOwners)))
 		return release
 	}
 
 	s.logger.Printf("swapped release %s (%s) for %s, which has cover art [%s]",
 		release.ID, release.Title, better.ID, strings.Join(reasons, " "))
 	return better
+}
+
+// pressingCount renders a count of pressings for a log line.
+func pressingCount(n int) string {
+	if n == 1 {
+		return "1 pressing"
+	}
+	return fmt.Sprintf("%d pressings", n)
 }
