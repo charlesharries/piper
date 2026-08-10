@@ -1,7 +1,6 @@
 // Package listenbrainz talks to ListenBrainz's metadata lookup endpoint, which
-// resolves loose artist/track/release names to MusicBrainz identifiers. It is a
-// purpose-built matcher and copes with the decorated metadata streaming
-// services emit far better than raw MusicBrainz search does.
+// does a better job matching loose inputs to MusicBrainz IDs than plain ol'
+// search does.
 package listenbrainz
 
 import (
@@ -21,9 +20,7 @@ import (
 
 const lookupEndpoint = "https://api.listenbrainz.org/1/metadata/lookup/"
 
-// userAgent identifies piper to ListenBrainz. Resolved per request rather than
-// once at init, because the configured agent is not loaded until after package
-// initialisation.
+// userAgent identifies piper to ListenBrainz.
 func userAgent() string {
 	return models.SubmissionAgent() + " ( https://github.com/teal-fm/piper )"
 }
@@ -43,9 +40,8 @@ func WithHTTPClient(c *http.Client) Option {
 	return func(lb *Client) { lb.httpClient = c }
 }
 
-// NewClient builds a client for the given user token. The endpoint requires
-// authentication, so an empty token yields a nil client and callers fall back
-// to searching MusicBrainz directly.
+// NewClient builds a client for the given user token. Since we need a token, if
+// one isn't set then just fall back to nil.
 func NewClient(token string, opts ...Option) *Client {
 	if strings.TrimSpace(token) == "" {
 		return nil
@@ -54,9 +50,7 @@ func NewClient(token string, opts ...Option) *Client {
 	lb := &Client{
 		token:      strings.TrimSpace(token),
 		httpClient: &http.Client{Timeout: 10 * time.Second},
-		// ListenBrainz is more permissive than MusicBrainz's 1/sec, but there
-		// is no reason to lean on it.
-		limiter: rate.NewLimiter(rate.Every(200*time.Millisecond), 4),
+		limiter:    rate.NewLimiter(rate.Every(200*time.Millisecond), 4),
 	}
 	for _, opt := range opts {
 		opt(lb)
@@ -64,9 +58,7 @@ func NewClient(token string, opts ...Option) *Client {
 	return lb
 }
 
-// lookupResponse is the subset of ListenBrainz's reply that piper uses. The reply
-// also carries release and artist ids, which are ignored: piper re-derives both
-// from the recording it looks up.
+// lookupResponse is the subset of ListenBrainz's reply that piper uses.
 type lookupResponse struct {
 	RecordingMBID string `json:"recording_mbid"`
 	Metadata      *struct {
@@ -77,8 +69,7 @@ type lookupResponse struct {
 	} `json:"metadata"`
 }
 
-// Lookup resolves a play to MusicBrainz identifiers. A miss is reported as a
-// nil result with a nil error, since not matching is an ordinary outcome.
+// Lookup resolves a play to MusicBrainz identifiers
 func (lb *Client) Lookup(ctx context.Context, artist, recording, release string) (*musicbrainz.ListenBrainzResult, error) {
 	if strings.TrimSpace(artist) == "" || strings.TrimSpace(recording) == "" {
 		return nil, nil
@@ -121,7 +112,7 @@ func (lb *Client) Lookup(ctx context.Context, artist, recording, release string)
 		return nil, fmt.Errorf("failed to decode lookup response: %w", err)
 	}
 
-	// An unmatched lookup comes back as an empty object rather than an error.
+	// An unmatched lookup is a valid result, so no error here
 	if parsed.RecordingMBID == "" {
 		return nil, nil
 	}

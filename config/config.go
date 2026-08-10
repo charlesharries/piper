@@ -29,14 +29,8 @@ func Load() {
 	viper.SetDefault("enable_lastfm", true)
 	viper.SetDefault("enable_applemusic", true)
 
-	// ListenBrainz is used to resolve plays to MusicBrainz ids before falling
-	// back to searching MusicBrainz. Its lookup endpoint requires
-	// authentication; without a token ListenBrainz is skipped entirely.
 	viper.SetDefault("listenbrainz.token", "")
-
-	// The agent piper identifies itself with, in submitted plays and upstream
-	// User-Agent headers. Empty means models.SubmissionAgent's build default.
-	viper.SetDefault("app.submission_agent", "")
+	viper.SetDefault("app.submission_agent", "") // i.e. user-agent
 
 	// Apple Music defaults
 	viper.SetDefault("applemusic.team_id", "")

@@ -25,8 +25,8 @@ import (
 	"github.com/teal-fm/piper/service/musicbrainz"
 )
 
-// goldenCase is one row of the evaluation set: the metadata a music service
-// would hand over, plus the MBIDs the matcher ought to arrive at.
+// goldenCase is one row of the evaluation set: some input from the connected
+// service, and expected output from our matcher.
 type goldenCase struct {
 	Name       string `json:"name"`
 	Artist     string `json:"artist"`
@@ -35,19 +35,10 @@ type goldenCase struct {
 	DurationMs int64  `json:"duration_ms,omitempty"`
 	Note       string `json:"note,omitempty"`
 
-	ExpectRecordingMBID string `json:"expect_recording_mbid,omitempty"`
-	// ExpectRecordingTitle asserts the recording by name. MusicBrainz holds a
-	// separate recording entry per compilation appearance for older tracks, so
-	// several MBIDs are equally right; what matters is not landing on an
-	// outtake, a live take or a karaoke version.
+	ExpectRecordingMBID  string `json:"expect_recording_mbid,omitempty"`
 	ExpectRecordingTitle string `json:"expect_recording_title,omitempty"`
-	// ExpectReleaseTitle asserts the album by name rather than by MBID. Most
-	// albums have dozens of equally correct pressings, so pinning a single
-	// release MBID would fail for reasons that have nothing to do with matching
-	// quality.
-	ExpectReleaseTitle string `json:"expect_release_title,omitempty"`
-	// ExpectNoMatch marks input that should be rejected rather than matched.
-	ExpectNoMatch bool `json:"expect_no_match,omitempty"`
+	ExpectReleaseTitle   string `json:"expect_release_title,omitempty"`
+	ExpectNoMatch        bool   `json:"expect_no_match,omitempty"` // i.e nonsense input
 }
 
 func (c goldenCase) track() models.Track {
@@ -135,7 +126,7 @@ func runBatch(service *musicbrainz.Service, path, explain string) error {
 		return err
 	}
 
-	fmt.Printf("Evaluating %d cases (MusicBrainz allows 1 request/sec, so this takes a while)\n\n", len(cases))
+	fmt.Printf("Evaluating %d cases (MusicBrainz allows 1 request/sec, so give it a sec)\n\n", len(cases))
 
 	var t tally
 	for _, c := range cases {
