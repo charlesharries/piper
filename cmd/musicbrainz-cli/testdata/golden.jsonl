@@ -24,8 +24,8 @@
 {"name":"Whole Lotta Love","artist":"Led Zeppelin","album":"How the West Was Won","duration_ms":1400000,"note":"live album, live recording is correct","expect_release_title":"How the West Was Won"}
 {"name":"Whole Lotta Love","artist":"Led Zeppelin","album":"Led Zeppelin II","duration_ms":333000,"note":"studio album must not get the live take","expect_recording_title":"Whole Lotta Love","expect_release_title":"Led Zeppelin II"}
 
-{"name":"シェリー","artist":"尾崎豊","album":"回帰線","duration_ms":304000,"note":"japanese title and artist","expect_recording_title":"シェリー","expect_release_title":"回帰線"}
-{"name":"Плот","artist":"Юрий Лоза","album":"Что сказано, то сказано","duration_ms":286000,"note":"cyrillic title and artist","expect_recording_title":"Плот"}
+{"name":"シェリー","artist":"尾崎豊","album":"回帰線","duration_ms":345720,"note":"japanese title and artist","expect_recording_title":"シェリー","expect_release_title":"回帰線"}
+{"name":"Плот","artist":"Юрий Лоза","album":"Что сказано, то сказано","duration_ms":316000,"note":"cyrillic title and artist","expect_recording_title":"Плот"}
 
 {"name":"Say \"Yes\"","artist":"Floetry","album":"Floetic","duration_ms":260000,"note":"double quotes in the title","expect_release_title":"Floetic"}
 {"name":"'Till I Collapse","artist":"Eminem","album":"The Eminem Show","duration_ms":297786,"note":"leading apostrophe","expect_recording_title":"'Till I Collapse","expect_release_title":"The Eminem Show"}
@@ -36,3 +36,10 @@
 {"name":"","artist":"","album":"","note":"empty input","expect_no_match":true}
 
 {"name": "Stability", "artist": "Death Cab for Cutie", "album": "The Stability EP", "duration_ms": 741000, "note": "EP track catalogued as a medley", "expect_release_title": "The Stability EP"}
+
+{"name":"Blade Runner Blues","artist":"Vangelis","album":"Blade Runner (Music From The Original Soundtrack)","duration_ms":534400,"note":"bootleg cut is 85s longer","expect_recording_mbid":"48bab008-288c-49b0-94e1-694849a5e7dd","expect_release_title":"Blade Runner"}
+{"name":"Memories of Green","artist":"Vangelis","album":"Blade Runner (Music From The Original Soundtrack)","duration_ms":305026,"note":"bootleg cut is 41s longer","expect_recording_mbid":"fd19347b-11f6-432e-a72c-af77ca7f1b4f","expect_release_title":"Blade Runner"}
+{"name":"Rachel's Song","artist":"Vangelis","album":"Blade Runner (Music From The Original Soundtrack)","duration_ms":288000,"note":"bootleg cut is 32s shorter","expect_recording_mbid":"c35eefc6-2b9d-4d12-b998-20570656013f","expect_release_title":"Blade Runner"}
+{"name":"Main Titles","artist":"Vangelis","album":"Blade Runner (Music From The Original Soundtrack)","duration_ms":222373,"note":"generic title shared with other Vangelis soundtracks","expect_recording_mbid":"019a1378-2cdc-4425-95f4-f84733872e05","expect_release_title":"Blade Runner"}
+{"name":"Wait for Me","artist":"Vangelis","album":"Blade Runner (Music From The Original Soundtrack)","duration_ms":327533,"note":"generic title, must not land on a compilation","expect_recording_mbid":"d5e67b1f-8814-43da-8ded-5f0370c70d14","expect_release_title":"Blade Runner"}
+{"name":"Damask Rose","artist":"Vangelis","album":"Blade Runner (Music From The Original Soundtrack)","duration_ms":152826,"note":"control: same album, already resolves","expect_recording_mbid":"88ff5a9f-d8f4-461c-939e-c153f49d903c","expect_release_title":"Blade Runner"}
