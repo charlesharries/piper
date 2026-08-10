@@ -361,6 +361,39 @@ func TestArtistScoreMatchesCollaborations(t *testing.T) {
 	}
 }
 
+// Some artists have non-Latin name for both artist & artistname,
+// and sort name (i.e. "Harris, Calvin") is the only Latin name
+// on their record.
+func TestArtistScoreUsesSortNameForNonLatinCredits(t *testing.T) {
+	tests := []struct {
+		name       string
+		artist     string
+		creditName string
+		artistName string
+		sortName   string
+	}{
+		{"mononym sorts as itself", "MEITEI", "Meitei / 冥丁", "冥丁", "Meitei"},
+		{"personal name sorts inverted", "Kenshi Yonezu", "米津玄師", "米津玄師", "Yonezu, Kenshi"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			in := newMatchInput(models.Track{
+				Name:   "Kintsugi",
+				Artist: []models.Artist{{Name: tt.artist}},
+			})
+
+			credit := ArtistCredit{Name: tt.creditName}
+			credit.Artist.Name = tt.artistName
+			credit.Artist.SortName = tt.sortName
+
+			if got := in.artistScore([]ArtistCredit{credit}); got != 1 {
+				t.Errorf("artistScore() = %v, want 1", got)
+			}
+		})
+	}
+}
+
 func TestIsVariantQualifier(t *testing.T) {
 	tests := []struct {
 		qualifier string

@@ -235,9 +235,11 @@ func buildSearchQuery(params SearchParams) string {
 		queryParts = append(queryParts, phrase("recording", params.Track))
 	}
 	if params.Artist != "" {
-		// artistname matches the individual artists on a credit rather than the
-		// rendered credit string, which is more forgiving for collaborations.
-		queryParts = append(queryParts, phrase("artistname", params.Artist))
+		// artistname holds each artist's canonical name; artist holds the
+		// rendered credit line. Foreign artists often have non-Latin canonical
+		// names, so searching by both is more reliable.
+		queryParts = append(queryParts, fmt.Sprintf("(%s OR %s)",
+			phrase("artistname", params.Artist), phrase("artist", params.Artist)))
 	}
 	if params.Release != "" {
 		queryParts = append(queryParts, phrase("release", params.Release))

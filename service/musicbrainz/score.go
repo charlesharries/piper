@@ -253,6 +253,21 @@ func (in matchInput) compareTitle(title string) (float64, bool) {
 	return score, unmatched
 }
 
+// sortNameReadings renders a MusicBrainz sort name the ways a music service
+// might credit it. Personal names sort inverted ("Yonezu, Kenshi"), so the
+// comma-swapped reading is offered alongside the literal one; band and mononym
+// sort names carry no comma and yield just the one.
+func sortNameReadings(sortName string) []string {
+	if strings.TrimSpace(sortName) == "" {
+		return nil
+	}
+	readings := []string{normalize(sortName)}
+	if family, given, ok := strings.Cut(sortName, ","); ok {
+		readings = append(readings, normalize(given+" "+family))
+	}
+	return readings
+}
+
 // artistScore returns the best similarity between any incoming artist name and
 // any name on the candidate's artist credit.
 func (in matchInput) artistScore(credits []ArtistCredit) float64 {
@@ -260,10 +275,14 @@ func (in matchInput) artistScore(credits []ArtistCredit) float64 {
 		return 0
 	}
 
-	candidates := make([]string, 0, len(credits)*2+1)
+	candidates := make([]string, 0, len(credits)*4+1)
 	var joined strings.Builder
 	for _, c := range credits {
 		candidates = append(candidates, normalize(c.Name), normalize(c.Artist.Name))
+
+		// In rare cases, SortName is the only Latin name available for an artist
+		candidates = append(candidates, sortNameReadings(c.Artist.SortName)...)
+
 		joined.WriteString(c.Name)
 		joined.WriteString(c.Joinphrase)
 	}

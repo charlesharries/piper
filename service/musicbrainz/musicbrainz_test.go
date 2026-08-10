@@ -19,7 +19,7 @@ func TestBuildSearchQuery(t *testing.T) {
 				Release: "Test Album",
 				ISRC:    "USUM71801197",
 			},
-			want: `isrc:"USUM71801197" AND recording:"Test Song" AND artistname:"Test Artist" AND release:"Test Album"`,
+			want: `isrc:"USUM71801197" AND recording:"Test Song" AND (artistname:"Test Artist" OR artist:"Test Artist") AND release:"Test Album"`,
 		},
 		{
 			name: "without ISRC",
@@ -28,7 +28,7 @@ func TestBuildSearchQuery(t *testing.T) {
 				Artist:  "Test Artist",
 				Release: "Test Album",
 			},
-			want: `recording:"Test Song" AND artistname:"Test Artist" AND release:"Test Album"`,
+			want: `recording:"Test Song" AND (artistname:"Test Artist" OR artist:"Test Artist") AND release:"Test Album"`,
 		},
 		{
 			name:   "only ISRC",
@@ -41,7 +41,7 @@ func TestBuildSearchQuery(t *testing.T) {
 				Track:  "Test Song",
 				Artist: "Test Artist",
 			},
-			want: `recording:"Test Song" AND artistname:"Test Artist"`,
+			want: `recording:"Test Song" AND (artistname:"Test Artist" OR artist:"Test Artist")`,
 		},
 		{
 			name: "quotes in title are escaped",
@@ -49,7 +49,7 @@ func TestBuildSearchQuery(t *testing.T) {
 				Track:  `Say "Yes"`,
 				Artist: "Test Artist",
 			},
-			want: `recording:"Say \"Yes\"" AND artistname:"Test Artist"`,
+			want: `recording:"Say \"Yes\"" AND (artistname:"Test Artist" OR artist:"Test Artist")`,
 		},
 		{
 			name:   "backslash in title is escaped",
@@ -132,9 +132,9 @@ func TestSearchTiers(t *testing.T) {
 		var withAlbum, withoutAlbum = -1, -1
 		for i, tier := range tiers {
 			switch tier.query {
-			case `recording:"Dreams" AND artistname:"Fleetwood Mac" AND release:"Rumours"`:
+			case `recording:"Dreams" AND (artistname:"Fleetwood Mac" OR artist:"Fleetwood Mac") AND release:"Rumours"`:
 				withAlbum = i
-			case `recording:"Dreams" AND artistname:"Fleetwood Mac"`:
+			case `recording:"Dreams" AND (artistname:"Fleetwood Mac" OR artist:"Fleetwood Mac")`:
 				withoutAlbum = i
 			}
 		}
@@ -187,7 +187,7 @@ func TestSearchTiers(t *testing.T) {
 		tiers := s.searchTiers(track("One Kiss", "Calvin Harris, Dua Lipa", "", ""))
 		var found bool
 		for _, tier := range tiers {
-			if tier.query == `recording:"One Kiss" AND artistname:"Calvin Harris, Dua Lipa"` {
+			if tier.query == `recording:"One Kiss" AND (artistname:"Calvin Harris, Dua Lipa" OR artist:"Calvin Harris, Dua Lipa")` {
 				found = true
 			}
 		}
