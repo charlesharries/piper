@@ -68,13 +68,11 @@ func TestLookupSuccess(t *testing.T) {
 		t.Fatal("Lookup() = nil, want a result")
 	}
 
-	// The body carries release_mbid and artist_mbids as ListenBrainz really
-	// sends them; piper takes neither, re-deriving both from the recording.
+	// The body carries release_mbid, artist_mbids and the cover art ids as
+	// ListenBrainz really sends them; piper takes none of them, re-deriving the
+	// release from the recording it looks up.
 	if got.RecordingMBID != "b1a9c0e9-d987-4042-ae91-78d6a3267d69" {
 		t.Errorf("RecordingMBID = %q", got.RecordingMBID)
-	}
-	if got.CAAReleaseMBID != "caa-release-mbid" {
-		t.Errorf("CAAReleaseMBID = %q, want the cover art holder", got.CAAReleaseMBID)
 	}
 
 	if auth := transport.last.Header.Get("Authorization"); auth != "Token test-token" {
@@ -86,12 +84,16 @@ func TestLookupSuccess(t *testing.T) {
 		"artist_name":    "Queen",
 		"recording_name": "Bohemian Rhapsody",
 		"release_name":   "A Night at the Opera",
-		"metadata":       "true",
-		"inc":            "release",
 	}
 	for key, want := range wantParams {
 		if got := query.Get(key); got != want {
 			t.Errorf("query %s = %q, want %q", key, got, want)
+		}
+	}
+	// Asking for cover art metadata is pure cost now that the answer is ignored.
+	for _, key := range []string{"metadata", "inc"} {
+		if got := query.Get(key); got != "" {
+			t.Errorf("query %s = %q, want it not to be sent", key, got)
 		}
 	}
 }
@@ -110,10 +112,10 @@ func TestLookupNoMatch(t *testing.T) {
 	}
 }
 
-// Cover art ids are optional; their absence must not lose the rest of the match.
-func TestLookupWithoutCoverArt(t *testing.T) {
-	client, _ := newTestClient(t, http.StatusOK,
-		`{"recording_mbid": "rec-mbid", "release_mbid": "rel-mbid"}`)
+// Everything but the recording id is optional, and a reply carrying none of it
+// still has to yield the match.
+func TestLookupBareReply(t *testing.T) {
+	client, _ := newTestClient(t, http.StatusOK, `{"recording_mbid": "rec-mbid"}`)
 
 	got, err := client.Lookup(context.Background(), "Queen", "Bohemian Rhapsody", "")
 	if err != nil {
@@ -121,9 +123,6 @@ func TestLookupWithoutCoverArt(t *testing.T) {
 	}
 	if got == nil || got.RecordingMBID != "rec-mbid" {
 		t.Fatalf("Lookup() = %v, want the recording mbid", got)
-	}
-	if got.CAAReleaseMBID != "" {
-		t.Errorf("CAAReleaseMBID = %q, want empty", got.CAAReleaseMBID)
 	}
 }
 

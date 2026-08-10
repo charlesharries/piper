@@ -157,13 +157,28 @@ const releaseConfidence = 0.8
 
 // earlier breaks scoring ties towards the original issue of an album, falling
 // back to MBID so the choice is stable across runs.
+//
+// Dates are compared a year at a time rather than as whole strings, because
+// MusicBrainz records them at whatever precision it has -- YYYY, YYYY-MM or
+// YYYY-MM-DD -- and comparing those directly makes "1994" sort ahead of
+// "1994-06-21". Within one year the more precise date wins: it is usually the
+// same pressing catalogued in more detail, and letting the vaguer entry take
+// the tie scatters an album's tracks across pressings.
 func earlier(a, b Release) bool {
 	aDated, bDated := len(a.Date) >= 4, len(b.Date) >= 4
 	if aDated != bDated {
 		return aDated
 	}
-	if a.Date != b.Date {
-		return a.Date < b.Date
+	if aDated {
+		if a.Date[:4] != b.Date[:4] {
+			return a.Date[:4] < b.Date[:4]
+		}
+		if len(a.Date) != len(b.Date) {
+			return len(a.Date) > len(b.Date)
+		}
+		if a.Date != b.Date {
+			return a.Date < b.Date
+		}
 	}
 	return a.ID < b.ID
 }

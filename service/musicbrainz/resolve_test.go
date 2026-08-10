@@ -21,6 +21,9 @@ type route struct {
 	// status, when set, is served once before falling back to 200, so retry
 	// paths can be exercised.
 	status int
+	// sticky keeps serving status instead of falling back, for MusicBrainz being
+	// down rather than merely busy.
+	sticky bool
 }
 
 // routedTransport matches routes in order and records every URL it was asked
@@ -42,7 +45,9 @@ func (rt *routedTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 		status := http.StatusOK
 		if r.status != 0 {
 			status = r.status
-			r.status = 0
+			if !r.sticky {
+				r.status = 0
+			}
 		}
 		return &http.Response{
 			StatusCode: status,
@@ -492,6 +497,67 @@ func TestResolveKeepsListenBrainzWhenSearchCannotBeatIt(t *testing.T) {
 	}
 	if match.Source != "listenbrainz" || match.Recording.ID != "photo-album-mbid" {
 		t.Errorf("match = %q via %s, want ListenBrainz's answer kept", match.Recording.Title, match.Source)
+	}
+}
+
+// The second opinion has to actually arrive. MusicBrainz sheds load with 503s
+// routinely, and when every tier fails the doubt was never resolved -- so
+// publishing ListenBrainz's answer anyway would put a recording piper distrusted
+// into the user's repo on the strength of an outage. This is what sent a play of
+// the Blade Runner soundtrack to a different Vangelis album entirely.
+func TestResolveDropsDoubtedListenBrainzWhenSearchCannotRun(t *testing.T) {
+	photoAlbum := release("The Photo Album", "The Photo Album", "2001-10-09", "US")
+	rec := recording("Stability", "Death Cab for Cutie", 740864, photoAlbum)
+	rec.ID = "photo-album-mbid"
+
+	svc, _ := newTestService(t,
+		route{match: "recording/photo-album-mbid", body: mustJSON(t, rec)},
+		// Every tier fails, for the whole run. A 500 rather than a 503 because
+		// only the throttling statuses are retried, and this test has no reason
+		// to sit through the backoff.
+		route{match: "/ws/2/recording?", body: `{"count":0,"recordings":[]}`,
+			status: http.StatusInternalServerError, sticky: true},
+	)
+	svc.listenbrainz = stubListenBrainz{result: &ListenBrainzResult{RecordingMBID: "photo-album-mbid"}}
+
+	_, err := svc.Resolve(context.Background(), stability())
+	if err == nil {
+		t.Fatal("Resolve() error = nil, want the unverifiable answer to be dropped")
+	}
+}
+
+// A recording whose length contradicts the play is doubted the same way one on
+// the wrong album is. A bootleg pressing catalogued under the album's own title
+// passes the album test, so length is the only thing that catches it.
+func TestResolveDoubtsListenBrainzWhenDurationDisagrees(t *testing.T) {
+	soundtrack := release("Blade Runner", "Blade Runner", "1993-12", "GB", "Soundtrack")
+
+	bootleg := recording("Blade Runner Blues", "Vangelis", 619133, soundtrack)
+	bootleg.ID = "bootleg-mbid"
+	official := recording("Blade Runner Blues", "Vangelis", 534400,
+		release("Blade Runner", "Blade Runner", "1994-06-21", "XE", "Soundtrack"))
+	official.ID = "official-mbid"
+
+	svc, transport := newTestService(t,
+		route{match: "recording/bootleg-mbid", body: mustJSON(t, bootleg)},
+		route{match: "/ws/2/recording?", body: searchBody(t, official)},
+	)
+	svc.listenbrainz = stubListenBrainz{result: &ListenBrainzResult{RecordingMBID: "bootleg-mbid"}}
+
+	match, err := svc.Resolve(context.Background(), models.Track{
+		Name:       "Blade Runner Blues",
+		Artist:     []models.Artist{{Name: "Vangelis"}},
+		Album:      "Blade Runner (Music From The Original Soundtrack)",
+		DurationMs: 534400,
+	})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if match.Recording.ID != "official-mbid" {
+		t.Errorf("matched %q, want search to have overruled the bootleg cut", match.Recording.ID)
+	}
+	if len(transport.searches()) == 0 {
+		t.Error("expected a search for the second opinion")
 	}
 }
 

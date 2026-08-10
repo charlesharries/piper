@@ -215,6 +215,101 @@ func TestScoreRecordingPrefersRecordingOnAGoodRelease(t *testing.T) {
 	}
 }
 
+// The Blade Runner case. MusicBrainz holds bootleg pressings of the soundtrack
+// whose tracks carry exactly the official titles but run minutes longer, so
+// title, artist and album all read perfectly and only the length dissents. A
+// weighted mean cannot reject on one signal out of four, which is how plays of
+// the 8:54 "Blade Runner Blues" were published as the 10:19 bootleg cut.
+func TestScoreRecordingRejectsContradictoryDuration(t *testing.T) {
+	in := newMatchInput(models.Track{
+		Name:       "Blade Runner Blues",
+		Artist:     []models.Artist{{Name: "Vangelis"}},
+		Album:      "Blade Runner (Music From The Original Soundtrack)",
+		DurationMs: 534400,
+	})
+
+	bootleg := release("Blade Runner", "Blade Runner", "1993-12", "GB", "Soundtrack")
+	bootleg.Status = "Bootleg"
+	rec := recording("Blade Runner Blues", "Vangelis", 619133, bootleg)
+
+	score, reasons := scoreRecording(in, rec)
+	if score >= minConfidence {
+		t.Errorf("score = %.3f (%v), want below %v for a recording 85s adrift", score, reasons, minConfidence)
+	}
+}
+
+// The penalty is for contradiction, not for imprecision. Services and
+// MusicBrainz routinely disagree by a few seconds on the same recording, and
+// durationScore already grades that.
+func TestScoreRecordingAcceptsNearbyDuration(t *testing.T) {
+	in := newMatchInput(models.Track{
+		Name:       "Blade Runner Blues",
+		Artist:     []models.Artist{{Name: "Vangelis"}},
+		Album:      "Blade Runner",
+		DurationMs: 534400,
+	})
+	rec := recording("Blade Runner Blues", "Vangelis", 549000, // ~15s out
+		release("Blade Runner", "Blade Runner", "1994-06-21", "XE", "Soundtrack"))
+
+	score, reasons := scoreRecording(in, rec)
+	if score < minConfidence {
+		t.Errorf("score = %.3f (%v), want at least %v", score, reasons, minConfidence)
+	}
+}
+
+// A length is only evidence when both sides have one. MusicBrainz omits lengths
+// on plenty of recordings, and penalising their absence would reject them all.
+func TestScoreRecordingIgnoresMissingLength(t *testing.T) {
+	in := newMatchInput(models.Track{
+		Name:       "Dreams",
+		Artist:     []models.Artist{{Name: "Fleetwood Mac"}},
+		Album:      "Rumours",
+		DurationMs: 257800,
+	})
+	rec := recording("Dreams", "Fleetwood Mac", 0,
+		release("Rumours", "Rumours", "1977-02-04", "US"))
+
+	score, reasons := scoreRecording(in, rec)
+	if score < minConfidence {
+		t.Errorf("score = %.3f (%v), want a missing length to cost nothing", score, reasons)
+	}
+}
+
+// Title and artist agreeing is not a match. Every recording of a song shares
+// both, and because the score is a weighted mean over the signals it has, the
+// pair alone would otherwise score a perfect 1.00.
+func TestScoreRecordingRejectsTitleAndArtistAlone(t *testing.T) {
+	in := newMatchInput(models.Track{
+		Name:   "Whole Lotta Love",
+		Artist: []models.Artist{{Name: "Led Zeppelin"}},
+	})
+	rec := recording("Whole Lotta Love", "Led Zeppelin", 0)
+	rec.Score = 0
+
+	score, reasons := scoreRecording(in, rec)
+	if score >= minConfidence {
+		t.Errorf("score = %.3f (%v), want title and artist alone to fall short of %v",
+			score, reasons, minConfidence)
+	}
+}
+
+// One corroborating signal is enough. Last.fm supplies no duration, so the album
+// has to be able to carry a match on its own.
+func TestScoreRecordingAcceptsAlbumAsCorroboration(t *testing.T) {
+	in := newMatchInput(models.Track{
+		Name:   "Go Your Own Way",
+		Artist: []models.Artist{{Name: "Fleetwood Mac"}},
+		Album:  "Rumours",
+	})
+	rec := recording("Go Your Own Way", "Fleetwood Mac", 0,
+		release("Rumours", "Rumours", "1977-02-04", "US"))
+
+	score, reasons := scoreRecording(in, rec)
+	if score < minConfidence {
+		t.Errorf("score = %.3f (%v), want the album to corroborate on its own", score, reasons)
+	}
+}
+
 // Without durations (Last.fm supplies none) the remaining signals still have to
 // carry a clean match.
 func TestScoreRecordingWithoutDuration(t *testing.T) {

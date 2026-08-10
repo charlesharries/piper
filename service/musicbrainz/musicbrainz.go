@@ -89,11 +89,16 @@ const negativeCacheTTL = 5 * time.Minute
 // ids are deliberately not carried: the recording is looked up against
 // MusicBrainz anyway, and the release is re-derived from that, so accepting
 // ListenBrainz's would mean two sources of truth for the same field.
+//
+// That once included the release the Cover Art Archive holds art for. It was
+// dropped because ListenBrainz picks a different one for nearly every track of
+// the same album -- seven across one ten-track soundtrack -- and it entered
+// release scoring at the same weight as whether a pressing is official at all,
+// so it scattered an album across pressings. preferReleaseWithArt finds the
+// pressings that have art from MusicBrainz directly, which is both independent
+// and consistent.
 type ListenBrainzResult struct {
 	RecordingMBID string
-	// CAAReleaseMBID is a release the Cover Art Archive is known to hold art
-	// for, which makes it a good release to attribute the play to.
-	CAAReleaseMBID string
 }
 
 // ListenBrainzClient resolves a play to MusicBrainz identifiers via
@@ -186,11 +191,7 @@ func (s *Service) resolveViaListenBrainz(ctx context.Context, in matchInput, tra
 		return nil, nil
 	}
 
-	artOwners := map[string]bool{}
-	if res.CAAReleaseMBID != "" {
-		artOwners[res.CAAReleaseMBID] = true
-	}
-	release := s.resolveRelease(ctx, in, *rec, artOwners)
+	release := s.resolveRelease(ctx, in, *rec, nil)
 
 	return &Match{
 		Recording:  *rec,
@@ -562,17 +563,23 @@ func (s *Service) Resolve(ctx context.Context, track models.Track) (*Match, erro
 	// about it than the same score would for a ranked search result. Accept it
 	// outright only when nothing about it looks doubtful; otherwise keep it as
 	// the incumbent and let search offer something better.
-	if lbMatch != nil && !in.albumDisagrees(lbMatch.Recording) {
-		s.logMatch(track, lbMatch)
-		return lbMatch, nil
-	}
+	var doubt string
 	if lbMatch != nil {
-		s.logger.Printf("second opinion on %q: %q is not on %q, searching",
-			track.Name, lbMatch.Recording.Title, track.Album)
+		reason, doubted := in.contradicts(lbMatch.Recording)
+		if !doubted {
+			s.logMatch(track, lbMatch)
+			return lbMatch, nil
+		}
+		doubt = reason
+		s.logger.Printf("second opinion on %q: ListenBrainz's %q disagrees on %s, searching",
+			track.Name, lbMatch.Recording.Title, reason)
 	}
 
 	var allCandidates []candidate
 	var lastErr error
+	// Whether any tier actually reached MusicBrainz. A doubted answer that
+	// survives a search is a different thing from one that was never checked.
+	var searched bool
 
 	for _, tier := range s.searchTiers(track) {
 		recordings, err := s.search(ctx, tier)
@@ -581,6 +588,7 @@ func (s *Service) Resolve(ctx context.Context, track models.Track) (*Match, erro
 			s.logger.Printf("search tier %q failed: %v", tier.query, err)
 			continue
 		}
+		searched = true
 
 		ranked := rankCandidates(in, recordings)
 		if len(ranked) > len(allCandidates) {
@@ -599,6 +607,11 @@ func (s *Service) Resolve(ctx context.Context, track models.Track) (*Match, erro
 		}
 
 		release := s.resolveRelease(ctx, in, best.recording, nil)
+		// Hand the winner its release so -explain can show what the play was
+		// actually attributed to. Only the winner: the losers would each need
+		// their own lookup, and the release is exactly what is being diagnosed
+		// when the recording was right and the pressing was not.
+		ranked[0].release = release
 		match := &Match{
 			Recording:  best.recording,
 			Release:    release,
@@ -610,9 +623,18 @@ func (s *Service) Resolve(ctx context.Context, track models.Track) (*Match, erro
 		return match, nil
 	}
 
-	if lbMatch != nil {
+	// Doubted is not discarded: search ran, could not better it, and ListenBrainz's
+	// answer still stands. But when no tier could be reached, the second opinion
+	// we asked for never arrived, and publishing the answer anyway would put a
+	// recording we distrusted into the user's repo on the strength of a
+	// MusicBrainz outage.
+	if lbMatch != nil && searched {
 		s.logMatch(track, lbMatch)
 		return lbMatch, nil
+	}
+	if lbMatch != nil {
+		s.logger.Printf("dropping doubted ListenBrainz match %q for %q: it disagrees on %s and no search tier could be reached",
+			lbMatch.Recording.Title, track.Name, doubt)
 	}
 	if lastErr != nil && len(allCandidates) == 0 {
 		return nil, lastErr

@@ -35,6 +35,26 @@ const (
 // "Dreams (outtake)".
 const qualifierPenalty = 0.25
 
+// durationConflictPenalty is subtracted when the play and the candidate both
+// carry a length and they disagree by more than durationScore tolerates.
+//
+// Weighting alone cannot express this. Duration is two parts in nine, so a
+// candidate that agrees on title and artist starts at 0.667 and clears
+// minConfidence on those two signals alone -- which is how a soundtrack, where
+// every candidate shares a title and an artist, resolved to bootleg cuts
+// running minutes longer than what was played. Twenty seconds apart is not a
+// weak signal, it is a different recording.
+const durationConflictPenalty = 0.25
+
+// uncorroboratedPenalty is subtracted when title and artist are the only
+// signals available.
+//
+// Two signals agreeing is not the evidence five are, but the score is a
+// weighted mean whose denominator shrinks with the signals it lacks, so a bare
+// title-and-artist match scores a perfect 1.00. Every recording of a song --
+// every live take, every karaoke version -- shares both.
+const uncorroboratedPenalty = 0.4
+
 // normalize prepares a string for comparison: it strips diacritics, lowercases,
 // spells out '&', and reduces everything else to single-space-separated
 // alphanumerics. This is what lets "Power, Corruption & Lies" compare equal to
@@ -314,18 +334,26 @@ func (in matchInput) albumScore(releases []Release, trackTitle string) float64 {
 // is a different record that merely shares an artist.
 const albumAgreement = 0.8
 
-// albumDisagrees reports whether a recording contradicts the album the music
-// service named. It is the check ListenBrainz's answer has to pass that a ranked
-// search result does not need: a search winner already beat every alternative
-// on this signal, where ListenBrainz's answer was never compared to anything.
+// contradicts reports whether what the music service told us argues against a
+// recording, naming the signal that objected. It is the check ListenBrainz's
+// answer has to pass that a ranked search result does not need: a search winner
+// already beat every alternative on these signals, where ListenBrainz's answer
+// was never compared to anything.
 //
-// Silent when the play named no album, or when the recording carries no
-// releases to judge -- neither is evidence against it.
-func (in matchInput) albumDisagrees(rec Recording) bool {
-	if in.album == "" || len(rec.Releases) == 0 {
-		return false
+// Each test stays silent when the evidence for it is missing -- no album named,
+// no releases to judge, no length on either side -- because absence is not
+// evidence against.
+func (in matchInput) contradicts(rec Recording) (string, bool) {
+	// Length first: it is the cheap test, and the one that catches a bootleg
+	// pressing catalogued under the album's own title, which the album test
+	// cannot see.
+	if in.durationMs > 0 && rec.Length > 0 && durationScore(in.durationMs, int64(rec.Length)) == 0 {
+		return "length", true
 	}
-	return in.albumScore(rec.Releases, rec.Title) < albumAgreement
+	if in.album != "" && len(rec.Releases) > 0 && in.albumScore(rec.Releases, rec.Title) < albumAgreement {
+		return "album", true
+	}
+	return "", false
 }
 
 // compareAlbum matches a release title against the incoming album name, trying
@@ -366,13 +394,26 @@ func scoreRecording(in matchInput, rec Recording) (float64, []string) {
 	add("title", title, weightTitle)
 	add("artist", in.artistScore(rec.ArtistCredit), weightArtist)
 
+	// corroborated records whether anything beyond title and artist had a view.
+	// Both duration and album are absent often enough on their own -- Last.fm
+	// supplies no durations, and a search result carries no releases to judge an
+	// album by -- that either one alone counts as corroboration.
+	var corroborated, durationConflict bool
+
 	if in.durationMs > 0 && rec.Length > 0 {
-		add("duration", durationScore(in.durationMs, int64(rec.Length)), weightDuration)
+		duration := durationScore(in.durationMs, int64(rec.Length))
+		add("duration", duration, weightDuration)
+		durationConflict = duration == 0
+		corroborated = true
 	}
 	if in.album != "" && len(rec.Releases) > 0 {
 		add("album", in.albumScore(rec.Releases, rec.Title), weightAlbum)
+		corroborated = true
 	}
 	if rec.Score > 0 {
+		// MusicBrainz's own query score says how well a record matched the
+		// query, not whether it is the right recording, so it does not count as
+		// corroboration however high it runs.
 		add("mb", float64(rec.Score)/100, weightMBScore)
 	}
 
@@ -388,6 +429,14 @@ func scoreRecording(in matchInput, rec Recording) (float64, []string) {
 	if rec.Video {
 		score -= qualifierPenalty
 		reasons = append(reasons, fmt.Sprintf("video=-%.2f", qualifierPenalty))
+	}
+	if durationConflict {
+		score -= durationConflictPenalty
+		reasons = append(reasons, fmt.Sprintf("conflict=-%.2f", durationConflictPenalty))
+	}
+	if !corroborated {
+		score -= uncorroboratedPenalty
+		reasons = append(reasons, fmt.Sprintf("uncorroborated=-%.2f", uncorroboratedPenalty))
 	}
 
 	return math.Max(0, score), reasons

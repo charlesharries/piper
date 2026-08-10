@@ -61,12 +61,6 @@ func NewClient(token string, opts ...Option) *Client {
 // lookupResponse is the subset of ListenBrainz's reply that piper uses.
 type lookupResponse struct {
 	RecordingMBID string `json:"recording_mbid"`
-	Metadata      *struct {
-		Release *struct {
-			CAAID          *int64 `json:"caa_id"`
-			CAAReleaseMBID string `json:"caa_release_mbid"`
-		} `json:"release"`
-	} `json:"metadata"`
 }
 
 // Lookup resolves a play to MusicBrainz identifiers
@@ -81,10 +75,8 @@ func (lb *Client) Lookup(ctx context.Context, artist, recording, release string)
 	if release != "" {
 		query.Set("release_name", release)
 	}
-	// metadata+inc=release returns the Cover Art Archive ids alongside the
-	// match, which tells us which release actually has artwork.
-	query.Set("metadata", "true")
-	query.Set("inc", "release")
+	// Deliberately no metadata+inc=release. That fetched cover art ids, and we
+	// don't take ListenBrainz's word on the release any more.
 
 	if err := lb.limiter.Wait(ctx); err != nil {
 		return nil, fmt.Errorf("rate limiter error: %w", err)
@@ -117,9 +109,5 @@ func (lb *Client) Lookup(ctx context.Context, artist, recording, release string)
 		return nil, nil
 	}
 
-	result := &musicbrainz.ListenBrainzResult{RecordingMBID: parsed.RecordingMBID}
-	if md := parsed.Metadata; md != nil && md.Release != nil && md.Release.CAAID != nil {
-		result.CAAReleaseMBID = md.Release.CAAReleaseMBID
-	}
-	return result, nil
+	return &musicbrainz.ListenBrainzResult{RecordingMBID: parsed.RecordingMBID}, nil
 }
