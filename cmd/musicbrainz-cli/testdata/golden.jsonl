@@ -43,3 +43,5 @@
 {"name":"Main Titles","artist":"Vangelis","album":"Blade Runner (Music From The Original Soundtrack)","duration_ms":222373,"note":"generic title shared with other Vangelis soundtracks","expect_recording_mbid":"019a1378-2cdc-4425-95f4-f84733872e05","expect_release_title":"Blade Runner"}
 {"name":"Wait for Me","artist":"Vangelis","album":"Blade Runner (Music From The Original Soundtrack)","duration_ms":327533,"note":"generic title, must not land on a compilation","expect_recording_mbid":"d5e67b1f-8814-43da-8ded-5f0370c70d14","expect_release_title":"Blade Runner"}
 {"name":"Damask Rose","artist":"Vangelis","album":"Blade Runner (Music From The Original Soundtrack)","duration_ms":152826,"note":"control: same album, already resolves","expect_recording_mbid":"88ff5a9f-d8f4-461c-939e-c153f49d903c","expect_release_title":"Blade Runner"}
+
+{"name":"Kintsugi","artist":"MEITEI","album":"Kofū","duration_ms":66061,"note":"artist catalogued as 冥丁; only the credit line is Latin","expect_recording_mbid":"24ec5ef4-b46b-41f3-b781-720cc279258f"}
