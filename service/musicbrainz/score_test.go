@@ -394,6 +394,42 @@ func TestArtistScoreUsesSortNameForNonLatinCredits(t *testing.T) {
 	}
 }
 
+// Nor is the sort name always Latin: 亜蘭知子 sorts as 亜蘭知子, and only an alias
+// records the name a music service credits her by.
+func TestArtistScoreUsesAliasesForNonLatinCredits(t *testing.T) {
+	in := newMatchInput(models.Track{
+		Name:   "I'm in Love",
+		Artist: []models.Artist{{Name: "Tomoko Aran"}},
+	})
+
+	credit := ArtistCredit{Name: "亜蘭知子"}
+	credit.Artist.Name = "亜蘭知子"
+	credit.Artist.SortName = "亜蘭知子"
+	credit.Artist.Aliases = []Alias{{Name: "あらんともこ"}, {Name: "Tomoko Aran"}}
+
+	if got := in.artistScore([]ArtistCredit{credit}); got != 1 {
+		t.Errorf("artistScore() = %v, want 1", got)
+	}
+}
+
+// An artist MBID scopes a whole search to one catalogue, so the name it was
+// resolved from has to be the artist's, not merely close to it.
+func TestArtistGoesBy(t *testing.T) {
+	ishibashi := Artist{
+		Name:     "石橋英子",
+		SortName: "Ishibashi, Eiko",
+		Aliases:  []Alias{{Name: "Eiko Ishibashi"}, {Name: "Ishibashi Eiko"}},
+	}
+	trio := Artist{Name: "Eiko Ishibashi Trio", SortName: "Ishibashi, Eiko, Trio"}
+
+	if got := ishibashi.goesBy("Eiko Ishibashi"); got != 1 {
+		t.Errorf("goesBy() = %v for the artist herself, want 1", got)
+	}
+	if got := trio.goesBy("Eiko Ishibashi"); got >= artistNameAgreement {
+		t.Errorf("goesBy() = %v for her trio, want below %v", got, artistNameAgreement)
+	}
+}
+
 func TestIsVariantQualifier(t *testing.T) {
 	tests := []struct {
 		qualifier string
@@ -437,6 +473,20 @@ func TestTitleScoreKeepsVariantOnTheMatchedSong(t *testing.T) {
 	in := newMatchInput(models.Track{Name: "Stability"})
 	if _, variant := in.titleScore("Stability (live) / Coney Island"); !variant {
 		t.Error("expected the live qualifier on the matched song to be penalised")
+	}
+}
+
+// A DJ mix is catalogued with its whole tracklist as the title. Read as a
+// medley it matches every song in the set, and since a mix credits every artist
+// it plays, artist agrees too -- which sent Tomoko Aran's "I'm in Love" to a
+// 25-song yacht rock mix on an album it has nothing to do with.
+func TestTitleScoreDoesNotTreatATracklistAsAMedley(t *testing.T) {
+	in := newMatchInput(models.Track{Name: "I'm in Love", Album: "浮遊空間"})
+
+	score, _ := in.titleScore("Side A (intro) / Sun Trails / Tasogare / Seven / Slowyazi / You / " +
+		"Plastic Love / Fools / Hit n Run / Dreams / Cruise / I’m in Love / I’m Not in Love")
+	if score > 0.5 {
+		t.Errorf("title score = %.2f, want a tracklist to be scored whole rather than per song", score)
 	}
 }
 

@@ -102,6 +102,75 @@ func searchBody(t *testing.T, recordings ...Recording) string {
 	return string(body)
 }
 
+func artistBody(t *testing.T, artists ...Artist) string {
+	t.Helper()
+	body, err := json.Marshal(ArtistSearchResponse{Artists: artists})
+	if err != nil {
+		t.Fatalf("marshalling artist body: %v", err)
+	}
+	return string(body)
+}
+
+// An artist MusicBrainz catalogues in another script cannot be found by the
+// name a music service credits them with, so every tier that searches by name
+// comes back empty and the artist's MBID is the only way in.
+func TestResolveScopesSearchToArtistMBID(t *testing.T) {
+	rec := recording("Drive My Car", "石橋英子", 304391,
+		release("Drive My Car Original Soundtrack", "Drive My Car Original Soundtrack", "2021-12-17", "JP"))
+	rec.ArtistCredit[0].Artist.SortName = "Ishibashi, Eiko"
+
+	svc, transport := newTestService(t,
+		route{match: "/ws/2/artist?", body: artistBody(t, Artist{
+			ID:       "eiko-mbid",
+			Name:     "石橋英子",
+			SortName: "Ishibashi, Eiko",
+			Aliases:  []Alias{{Name: "Eiko Ishibashi"}},
+		})},
+		route{match: "arid", body: searchBody(t, rec)},
+	)
+
+	play := models.Track{
+		Name:       "Drive My Car",
+		Artist:     []models.Artist{{Name: "Eiko Ishibashi"}},
+		Album:      "Drive My Car Original Soundtrack",
+		DurationMs: 304390,
+	}
+
+	match, err := svc.Resolve(context.Background(), play)
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if match.Recording.ID != rec.ID {
+		t.Errorf("matched %q, want %q", match.Recording.ID, rec.ID)
+	}
+	if scoped := transport.matching("arid"); len(scoped) != 1 {
+		t.Errorf("made %d arid-scoped searches (%v), want 1", len(scoped), scoped)
+	}
+}
+
+// A near miss is a different act, and scoping to it would search somebody
+// else's catalogue.
+func TestResolveSkipsArtistScopeWhenNobodyGoesByTheName(t *testing.T) {
+	svc, transport := newTestService(t, route{match: "/ws/2/artist?", body: artistBody(t, Artist{
+		ID:       "trio-mbid",
+		Name:     "Eiko Ishibashi Trio",
+		SortName: "Ishibashi, Eiko, Trio",
+	})})
+
+	_, err := svc.Resolve(context.Background(), models.Track{
+		Name:       "Drive My Car",
+		Artist:     []models.Artist{{Name: "Eiko Ishibashi"}},
+		Album:      "Drive My Car Original Soundtrack",
+		DurationMs: 304390,
+	})
+	if !errors.Is(err, ErrNoConfidentMatch) {
+		t.Fatalf("Resolve() error = %v, want ErrNoConfidentMatch", err)
+	}
+	if scoped := transport.matching("arid"); len(scoped) != 0 {
+		t.Errorf("searched %v, want no arid-scoped search", scoped)
+	}
+}
+
 func TestResolveMatchesOnISRC(t *testing.T) {
 	rec := recording("Bohemian Rhapsody", "Queen", 355106,
 		release("A Night at the Opera", "A Night at the Opera", "1975-11-21", "GB"))
