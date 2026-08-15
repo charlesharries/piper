@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -53,6 +54,12 @@ func (t *trackResponseTransport) RoundTrip(req *http.Request) (*http.Response, e
 		Body:       io.NopCloser(strings.NewReader(t.response)),
 		Header:     make(http.Header),
 	}, nil
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }
 
 // newTestDB creates an in-memory SQLite database for testing.
@@ -179,6 +186,112 @@ func TestProcessUserSavesDifferentUploadedTrack(t *testing.T) {
 
 	if got := env.trackCount(t); got != 2 {
 		t.Errorf("expected 2 tracks (new upload saved), got %d", got)
+	}
+}
+
+func TestGetCurrentAppleMusicTrackResolvesCatalogURL(t *testing.T) {
+	testDB := newTestDB(t)
+	var paths []string
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		paths = append(paths, req.URL.Path)
+		switch req.URL.Path {
+		case "/v1/me/recent/played/tracks":
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Status:     "200 OK",
+				Body:       io.NopCloser(strings.NewReader(`{"data":[{"id":"i.library-song","attributes":{"name":"Catalog Song","artistName":"Catalog Artist","albumName":"Catalog Album","playParams":{"id":"i.library-song","kind":"song","catalogId":"123456789"}}}]}`)),
+				Header:     make(http.Header),
+			}, nil
+		case "/v1/me/storefront":
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Status:     "200 OK",
+				Body:       io.NopCloser(strings.NewReader(`{"data":[{"id":"us"}]}`)),
+				Header:     make(http.Header),
+			}, nil
+		case "/v1/catalog/us/songs":
+			if got := req.URL.Query().Get("ids"); got != "123456789" {
+				t.Errorf("catalog ids = %q, want %q", got, "123456789")
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Status:     "200 OK",
+				Body:       io.NopCloser(strings.NewReader(`{"data":[{"attributes":{"url":"https://music.apple.com/us/song/catalog-song/123456789"}}]}`)),
+				Header:     make(http.Header),
+			}, nil
+		default:
+			return nil, fmt.Errorf("unexpected request path %q", req.URL.Path)
+		}
+	})
+	svc := newTestService(t, testDB, transport)
+	user := createTestUser(t, testDB)
+
+	track, err := svc.GetCurrentAppleMusicTrack(context.Background(), user)
+	if err != nil {
+		t.Fatalf("GetCurrentAppleMusicTrack returned error: %v", err)
+	}
+	if track.Attributes.URL != "https://music.apple.com/us/song/catalog-song/123456789" {
+		t.Fatalf("track URL = %q, want catalog URL", track.Attributes.URL)
+	}
+	if got, want := strings.Join(paths, ","), "/v1/me/recent/played/tracks,/v1/me/storefront,/v1/catalog/us/songs"; got != want {
+		t.Fatalf("request paths = %q, want %q", got, want)
+	}
+}
+
+func TestFetchRecentPlayedTracksRequestsLibrarySongs(t *testing.T) {
+	testDB := newTestDB(t)
+	var gotTypes, gotLimit string
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		gotTypes = req.URL.Query().Get("types")
+		gotLimit = req.URL.Query().Get("limit")
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Body:       io.NopCloser(strings.NewReader(`{"data":[]}`)),
+			Header:     make(http.Header),
+		}, nil
+	})
+	svc := newTestService(t, testDB, transport)
+
+	if _, err := svc.FetchRecentPlayedTracks(context.Background(), "user-token", 1); err != nil {
+		t.Fatalf("FetchRecentPlayedTracks returned error: %v", err)
+	}
+
+	if gotTypes != "songs,library-songs" {
+		t.Errorf("types query = %q, want %q", gotTypes, "songs,library-songs")
+	}
+	if gotLimit != "1" {
+		t.Errorf("limit query = %q, want %q", gotLimit, "1")
+	}
+}
+
+func TestFetchRecentPlayedTracksIncludesAppleErrorDetails(t *testing.T) {
+	testDB := newTestDB(t)
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusForbidden,
+			Status:     "403 Forbidden",
+			Body: io.NopCloser(strings.NewReader(`{
+				"errors":[{
+					"status":"403",
+					"code":"AUTHORIZATION_ERROR",
+					"title":"Forbidden",
+					"detail":"The music user token is invalid or expired."
+				}]
+			}`)),
+			Header: make(http.Header),
+		}, nil
+	})
+	svc := newTestService(t, testDB, transport)
+
+	_, err := svc.FetchRecentPlayedTracks(context.Background(), "user-token", 1)
+	if err == nil {
+		t.Fatal("FetchRecentPlayedTracks returned nil error")
+	}
+	for _, want := range []string{"403 Forbidden", "Forbidden", "invalid or expired", "AUTHORIZATION_ERROR"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not contain %q", err, want)
+		}
 	}
 }
 
