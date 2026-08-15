@@ -216,6 +216,18 @@ func newMatchInput(track models.Track) matchInput {
 // "Stability / Coney Island (alternate version)".
 const medleySeparator = " / "
 
+// maxMedleySongs bounds how many songs a slash-separated title may name before
+// it stops being read as a medley.
+//
+// The same separator catalogues a DJ mix, whose title is the whole tracklist of
+// the set. Scoring on the best-matching song means such a recording matches any
+// song it contains at 1.00, and a mix credits every artist it plays, so artist
+// matches outright too -- which is how a play of Tomoko Aran's "I'm in Love"
+// resolved to a 25-song yacht rock mix. Beyond a few songs a title is a
+// tracklist, and the play belongs to one of the recordings it was assembled
+// from rather than to the assembly.
+const maxMedleySongs = 3
+
 // titleScore compares the incoming title against a candidate's, and reports
 // whether the candidate carries an unmatched variant qualifier.
 //
@@ -227,7 +239,7 @@ func (in matchInput) titleScore(recTitle string) (score float64, unmatchedVarian
 	// without being a medley.
 	score, unmatchedVariant = in.compareTitle(recTitle)
 
-	if parts := strings.Split(recTitle, medleySeparator); len(parts) > 1 {
+	if parts := strings.Split(recTitle, medleySeparator); len(parts) > 1 && len(parts) <= maxMedleySongs {
 		for _, part := range parts {
 			if partScore, partVariant := in.compareTitle(part); partScore > score {
 				score, unmatchedVariant = partScore, partVariant
@@ -268,6 +280,26 @@ func sortNameReadings(sortName string) []string {
 	return readings
 }
 
+// artistNameAgreement is how closely an artist has to answer to the name a play
+// credited before their MBID is trusted to scope a search to their catalogue.
+// It is deliberately strict: an artist's name is all that ties them to the play,
+// and "Eiko Ishibashi Trio" is a different act from Eiko Ishibashi.
+const artistNameAgreement = 0.9
+
+// goesBy rates how strongly an artist answers to a name, across every reading
+// MusicBrainz files them under.
+func (a Artist) goesBy(name string) float64 {
+	normalized := normalize(name)
+	best := similarity(normalized, normalize(a.Name))
+	for _, reading := range sortNameReadings(a.SortName) {
+		best = math.Max(best, similarity(normalized, reading))
+	}
+	for _, alias := range a.Aliases {
+		best = math.Max(best, similarity(normalized, normalize(alias.Name)))
+	}
+	return best
+}
+
 // artistScore returns the best similarity between any incoming artist name and
 // any name on the candidate's artist credit.
 func (in matchInput) artistScore(credits []ArtistCredit) float64 {
@@ -282,6 +314,13 @@ func (in matchInput) artistScore(credits []ArtistCredit) float64 {
 
 		// In rare cases, SortName is the only Latin name available for an artist
 		candidates = append(candidates, sortNameReadings(c.Artist.SortName)...)
+
+		// Nor is the sort name always Latin. An artist held in another script is
+		// still credited by their Latin name on a music service, and an alias is
+		// where that spelling is recorded.
+		for _, alias := range c.Artist.Aliases {
+			candidates = append(candidates, normalize(alias.Name))
+		}
 
 		joined.WriteString(c.Name)
 		joined.WriteString(c.Joinphrase)

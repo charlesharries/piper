@@ -22,13 +22,27 @@ import (
 
 // ArtistCredit API Types
 type ArtistCredit struct {
-	Artist struct {
-		ID       string `json:"id"`
-		Name     string `json:"name"`
-		SortName string `json:"sort-name,omitempty"`
-	} `json:"artist"`
+	Artist     Artist `json:"artist"`
 	Joinphrase string `json:"joinphrase,omitempty"`
 	Name       string `json:"name"`
+}
+
+type Artist struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	SortName string `json:"sort-name,omitempty"`
+	// Aliases are the other names an artist is known by, which is where the
+	// Latin spelling of a name MusicBrainz holds in another script lives. Search
+	// responses carry them; the recording lookup endpoint does not.
+	Aliases []Alias `json:"aliases,omitempty"`
+}
+
+type Alias struct {
+	Name string `json:"name"`
+}
+
+type ArtistSearchResponse struct {
+	Artists []Artist `json:"artists"`
 }
 
 type ReleaseGroup struct {
@@ -121,6 +135,8 @@ type Service struct {
 	// pressingsCache holds a release group's pressings and which of them have
 	// cover art, keyed by release group MBID.
 	pressingsCache *ttlCache[pressings]
+	// artistCache holds resolved artist MBIDs, keyed by endpoint.
+	artistCache *ttlCache[string]
 }
 
 // Option configures a Service after construction.
@@ -157,6 +173,7 @@ func NewMusicBrainzService(db *db.DB, opts ...Option) *Service {
 		limiter:        limiter,
 		searchCache:    newTTLCache[[]Recording](maxSearchCacheEntries),
 		pressingsCache: newTTLCache[pressings](maxSearchCacheEntries),
+		artistCache:    newTTLCache[string](maxSearchCacheEntries),
 		cacheTTL:       defaultCacheTTL,              // Set the cache TTL
 		cleaner:        *NewMetadataCleaner("Latin"), // Initialize the cleaner
 		logger:         logger,
@@ -254,6 +271,10 @@ type searchRequest struct {
 	// dismax swaps the Lucene parser for MusicBrainz's fuzzy one, which copes
 	// better with unfielded, messy input.
 	dismax bool
+	// scopeArtist names an artist whose MBID is to be resolved and appended to
+	// the query as an arid filter. The lookup costs a request of its own, so it
+	// is left until the tier actually runs.
+	scopeArtist string
 }
 
 // defaultSearchLimit is the number of candidates to consider. MusicBrainz
@@ -276,6 +297,27 @@ func buildSearchEndpoint(req searchRequest) string {
 	// not, which is why the ISRC tier verifies via the query rather than the
 	// response.
 	return "https://musicbrainz.org/ws/2/recording?" + q.Encode()
+}
+
+// artistSearchLimit is how many artists to weigh when resolving a name. The
+// artist wanted is routinely not MusicBrainz's top hit -- a search for "Eiko
+// Ishibashi" ranks her trio above her -- so the answer is chosen on name
+// agreement rather than on MusicBrainz's ranking.
+const artistSearchLimit = 5
+
+// buildArtistEndpoint builds a search for an artist by name.
+//
+// Both artist fields on the recording index hold names as catalogued: `artist`
+// the credit line, `artistname` the artist's own name. Neither consults
+// aliases, so an artist MusicBrainz holds in a non-Latin script cannot be found
+// by their Latin name however it is spelled. The artist index does index
+// aliases, which makes this the way back to their MBID.
+func buildArtistEndpoint(name string) string {
+	q := url.Values{}
+	q.Set("query", fmt.Sprintf("%s OR %s", phrase("artist", name), phrase("alias", name)))
+	q.Set("fmt", "json")
+	q.Set("limit", strconv.Itoa(artistSearchLimit))
+	return "https://musicbrainz.org/ws/2/artist?" + q.Encode()
 }
 
 // buildRecordingEndpoint builds a direct lookup for a known recording. Unlike
@@ -435,6 +477,61 @@ func (s *Service) search(ctx context.Context, req searchRequest) ([]Recording, e
 	return result.Recordings, nil
 }
 
+// artistMBID resolves an artist name to its MusicBrainz id, returning an empty
+// id when nobody convincingly goes by that name. A wrong id would scope a
+// search to somebody else's catalogue, which is worse than not scoping it at
+// all, so a near miss is rejected rather than merely ranked lower.
+func (s *Service) artistMBID(ctx context.Context, name string) (string, error) {
+	endpoint := buildArtistEndpoint(name)
+
+	if mbid, found := s.artistCache.get(endpoint); found {
+		return mbid, nil
+	}
+
+	var result ArtistSearchResponse
+	if err := s.doRequest(ctx, endpoint, &result); err != nil {
+		return "", err
+	}
+
+	var mbid string
+	var best float64
+	for _, artist := range result.Artists {
+		if agreement := artist.goesBy(name); agreement > best {
+			mbid, best = artist.ID, agreement
+		}
+	}
+
+	ttl := s.cacheTTL
+	if best < artistNameAgreement {
+		// Not knowing who an artist is is as likely to be a gap MusicBrainz has
+		// since filled as a settled answer, so it is forgotten quickly.
+		mbid, ttl = "", negativeCacheTTL
+		s.logger.Printf("no MusicBrainz artist goes by %q", name)
+	}
+	s.artistCache.put(endpoint, mbid, ttl)
+	return mbid, nil
+}
+
+// scopeTier resolves the artist a tier filters on, reporting false when the
+// tier cannot run because nobody was found to scope it to.
+func (s *Service) scopeTier(ctx context.Context, req searchRequest) (searchRequest, bool) {
+	if req.scopeArtist == "" {
+		return req, true
+	}
+
+	mbid, err := s.artistMBID(ctx, req.scopeArtist)
+	if err != nil {
+		s.logger.Printf("artist lookup for %q failed: %v", req.scopeArtist, err)
+		return req, false
+	}
+	if mbid == "" {
+		return req, false
+	}
+
+	req.query = fmt.Sprintf("%s AND arid:%s", req.query, mbid)
+	return req, true
+}
+
 // LookupRecording fetches a single recording with its full release list. Search
 // results carry only a subset of a recording's releases, so this is used to get
 // a better release pool once the recording itself is settled.
@@ -497,6 +594,20 @@ func (s *Service) searchTiers(track models.Track) []searchRequest {
 	// sent us in case cleaning was what lost the match.
 	addTier(SearchParams{Track: track.Name, Artist: artist, Release: track.Album}, defaultSearchLimit)
 	addTier(SearchParams{Track: track.Name, Artist: artist}, 50)
+
+	// Every tier above finds an artist by the name they are catalogued under, so
+	// an artist MusicBrainz holds in a non-Latin script is unreachable by the
+	// Latin name a music service credits them with, and all of those tiers come
+	// back empty. Resolving the name to an MBID goes through the artist index,
+	// which does consult aliases, and filtering on that id sidesteps names
+	// altogether. See buildArtistEndpoint.
+	if scope := cmp.Or(cleanArtist, artist); scope != "" && cleanTrack != "" {
+		tiers = append(tiers, searchRequest{
+			query:       phrase("recording", cleanTrack),
+			limit:       defaultSearchLimit,
+			scopeArtist: scope,
+		})
+	}
 
 	// Last resort: hand the bare words to MusicBrainz's fuzzy parser.
 	if query := strings.Join(strings.Fields(freeText(track.Name+" "+artist)), " "); query != "" && !seen[query] {
@@ -584,6 +695,11 @@ func (s *Service) Resolve(ctx context.Context, track models.Track) (*Match, erro
 	var searched bool
 
 	for _, tier := range s.searchTiers(track) {
+		tier, ok := s.scopeTier(ctx, tier)
+		if !ok {
+			continue
+		}
+
 		recordings, err := s.search(ctx, tier)
 		if err != nil {
 			lastErr = err

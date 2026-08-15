@@ -181,6 +181,28 @@ func TestSearchTiers(t *testing.T) {
 		}
 	})
 
+	// The artist-scoped tier costs a lookup of its own, so it goes after every
+	// tier that searches by name -- but still ahead of the fuzzy parser, which
+	// has no artist filter at all.
+	t.Run("artist scope sits between the named tiers and dismax", func(t *testing.T) {
+		tiers := s.searchTiers(track("Dreams", "Fleetwood Mac", "Rumours", ""))
+		scoped := -1
+		for i, tier := range tiers {
+			if tier.scopeArtist != "" {
+				scoped = i
+			}
+		}
+		if scoped == -1 {
+			t.Fatalf("missing artist-scoped tier in %v", queries(tiers))
+		}
+		if want := `recording:"Dreams"`; tiers[scoped].query != want {
+			t.Errorf("scoped tier query = %q, want %q", tiers[scoped].query, want)
+		}
+		if scoped != len(tiers)-2 {
+			t.Errorf("artist-scoped tier at %d, want second to last of %d", scoped, len(tiers))
+		}
+	})
+
 	t.Run("uncleaned retry is included", func(t *testing.T) {
 		// The cleaner truncates artists at the first comma, so the raw credit
 		// has to get its own attempt.
