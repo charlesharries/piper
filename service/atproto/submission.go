@@ -33,7 +33,7 @@ func SubmitPlayToPDS(ctx context.Context, did string, mostRecentAtProtoSessionID
 
 	// Create the record
 	input := comatproto.RepoCreateRecord_Input{
-		Collection: "fm.teal.alpha.feed.play",
+		Collection: "fm.teal.feed.play",
 		Repo:       client.AccountDID.String(),
 		Record:     &lexutil.LexiconTypeDecoder{Val: playRecord},
 	}
@@ -46,16 +46,16 @@ func SubmitPlayToPDS(ctx context.Context, did string, mostRecentAtProtoSessionID
 	return nil
 }
 
-// TrackToPlayRecord converts a models.Track to teal.AlphaFeedPlay
-func TrackToPlayRecord(track *models.Track) (*teal.AlphaFeedPlay, error) {
+// TrackToPlayRecord converts a models.Track to teal.FeedPlay
+func TrackToPlayRecord(track *models.Track) (*teal.FeedPlay, error) {
 	if track.Name == "" {
 		return nil, fmt.Errorf("track name cannot be empty")
 	}
 
 	// Convert artists
-	artists := make([]*teal.AlphaFeedDefs_Artist, 0, len(track.Artist))
+	artists := make([]*teal.FeedDefs_Artist, 0, len(track.Artist))
 	for _, a := range track.Artist {
-		artist := &teal.AlphaFeedDefs_Artist{
+		artist := &teal.FeedDefs_Artist{
 			ArtistName: a.Name,
 			ArtistMbId: models.FormatMBIDURI(a.MBID),
 		}
@@ -80,39 +80,30 @@ func TrackToPlayRecord(track *models.Track) (*teal.AlphaFeedPlay, error) {
 		isrcPtr = &track.ISRC
 	}
 
-	var originUrlPtr *string
-	if track.URL != "" {
-		originUrlPtr = &track.URL
-	}
+	originURI := models.FormatOriginURI(track.URL)
 
-	servicePtr := models.FormatMusicServiceBaseDomain(track.ServiceBaseUrl)
+	serviceURI := models.FormatMusicServiceURI(track.ServiceBaseUrl)
 
 	var releaseNamePtr *string
 	if track.Album != "" {
 		releaseNamePtr = &track.Album
 	}
 
-	var releaseDiscriminantPtr *string
-	if track.ReleaseDiscriminant != "" {
-		releaseDiscriminantPtr = &track.ReleaseDiscriminant
-	}
-
 	submissionAgent := models.SubmissionAgent()
 
-	playRecord := &teal.AlphaFeedPlay{
-		LexiconTypeID:          "fm.teal.alpha.feed.play",
-		TrackName:              track.Name,
-		Artists:                artists,
-		Duration:               durationPtr,
-		PlayedTime:             playedTimeStr,
-		RecordingMbId:          models.FormatMBIDURI(track.RecordingMBID),
-		ReleaseMbId:            models.FormatMBIDURI(track.ReleaseMBID),
-		ReleaseName:            releaseNamePtr,
-		ReleaseDiscriminant:    releaseDiscriminantPtr,
-		Isrc:                   isrcPtr,
-		OriginUrl:              originUrlPtr,
-		MusicServiceBaseDomain: servicePtr,
-		SubmissionClientAgent:  &submissionAgent,
+	playRecord := &teal.FeedPlay{
+		LexiconTypeID:         "fm.teal.feed.play",
+		TrackName:             track.Name,
+		Artists:               artists,
+		Duration:              durationPtr,
+		PlayedTime:            playedTimeStr,
+		RecordingMbId:         models.FormatMBIDURI(track.RecordingMBID),
+		ReleaseMbId:           models.FormatMBIDURI(track.ReleaseMBID),
+		ReleaseName:           releaseNamePtr,
+		Isrc:                  isrcPtr,
+		OriginUri:             originURI,
+		MusicServiceUri:       serviceURI,
+		SubmissionClientAgent: &submissionAgent,
 	}
 
 	return playRecord, nil
