@@ -30,12 +30,14 @@ type application struct {
 	sessionManager    *session.Manager
 	oauthManager      *oauth.ServiceManager
 	spotifyService    *spotify.Service
+	lastfmService     *lastfm.Service
 	apiKeyService     *apikeyService.Service
 	mbService         *musicbrainz.Service
 	atprotoService    *atproto.AuthService
 	playingNowService *playingnow.Service
 	appleMusicService *applemusic.Service
 	pages             *pages.Pages
+	buildTime         time.Time
 }
 
 // JSON API handlers
@@ -212,10 +214,12 @@ func main() {
 		apiKeyService:     apiKeyService,
 		mbService:         mbService,
 		spotifyService:    spotifyService,
+		lastfmService:     lastfmService,
 		atprotoService:    atprotoService,
 		playingNowService: playingNowService,
 		appleMusicService: appleMusicService,
 		pages:             pages.NewPages(),
+		buildTime:         resolveBuildTime(),
 	}
 
 	trackerInterval := time.Duration(viper.GetInt("tracker.interval")) * time.Second

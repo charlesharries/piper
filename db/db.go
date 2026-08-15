@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -68,6 +69,21 @@ func (db *DB) Initialize() error {
 	_, err = db.Exec(`ALTER TABLE users ADD COLUMN applemusic_user_token TEXT`)
 	if err != nil && err.Error() != "duplicate column name: applemusic_user_token" {
 		return err
+	}
+
+	// Cached ATProto public profile
+	for _, column := range []string{
+		"handle TEXT",
+		"display_name TEXT",
+		"avatar_url TEXT",
+		"profile_fetched_at TIMESTAMP",
+		"lastfm_avatar_url TEXT",
+	} {
+		name := strings.Fields(column)[0]
+		_, err = db.Exec(`ALTER TABLE users ADD COLUMN ` + column)
+		if err != nil && err.Error() != "duplicate column name: "+name {
+			return err
+		}
 	}
 
 	_, err = db.Exec(`
@@ -229,6 +245,23 @@ func (db *DB) AddSpotifySession(userID int64, username, email, spotifyId, access
 	return user, err
 }
 
+// ClearSpotifySession removes the user's Spotify link. Only spotify sets
+// username and email, so these gotta be deleted as well.
+func (db *DB) ClearSpotifySession(userID int64) error {
+	_, err := db.Exec(`
+	UPDATE users
+	SET username = NULL,
+	    email = NULL,
+	    spotify_id = NULL,
+	    access_token = NULL,
+	    refresh_token = NULL,
+	    token_expiry = NULL,
+	    updated_at = ?
+	WHERE id = ?`, time.Now().UTC(), userID)
+
+	return err
+}
+
 func (db *DB) GetUserByID(ID int64) (*models.User, error) {
 	user := &models.User{}
 
@@ -243,13 +276,19 @@ func (db *DB) GetUserByID(ID int64) (*models.User, error) {
            refresh_token,
            token_expiry,
            lastfm_username,
+           lastfm_avatar_url,
            applemusic_user_token,
+           handle,
+           display_name,
+           avatar_url,
+           profile_fetched_at,
            created_at,
            updated_at
     FROM users WHERE id = ?`, ID).Scan(
 		&user.ID, &user.Username, &user.Email, &user.ATProtoDID, &user.MostRecentAtProtoSessionID, &user.SpotifyID,
 		&user.AccessToken, &user.RefreshToken, &user.TokenExpiry,
-		&user.LastFMUsername, &user.AppleMusicUserToken,
+		&user.LastFMUsername, &user.LastFMAvatarURL, &user.AppleMusicUserToken,
+		&user.Handle, &user.DisplayName, &user.AvatarURL, &user.ProfileFetchedAt,
 		&user.CreatedAt, &user.UpdatedAt)
 
 	if errors.Is(err, sql.ErrNoRows) {

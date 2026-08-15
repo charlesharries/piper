@@ -280,8 +280,9 @@ type AppleRecentTrack struct {
 		Isrc             *string `json:"isrc"`
 		URL              string  `json:"url"`
 		PlayParams       *struct {
-			ID   string `json:"id"`
-			Kind string `json:"kind"`
+			ID        string `json:"id"`
+			Kind      string `json:"kind"`
+			CatalogID string `json:"catalogId"`
 		} `json:"playParams"`
 	} `json:"attributes"`
 }
@@ -298,9 +299,43 @@ type recentPlayedResponse struct {
 	Data []AppleRecentTrack `json:"data"`
 }
 
+type appleMusicErrorResponse struct {
+	Errors []struct {
+		Status string `json:"status"`
+		Code   string `json:"code"`
+		Title  string `json:"title"`
+		Detail string `json:"detail"`
+	} `json:"errors"`
+}
+
+func newAppleMusicAPIError(status string, body []byte) error {
+	var parsed appleMusicErrorResponse
+	if err := json.Unmarshal(body, &parsed); err == nil && len(parsed.Errors) > 0 {
+		apiErr := parsed.Errors[0]
+		message := strings.TrimSpace(apiErr.Title)
+		if detail := strings.TrimSpace(apiErr.Detail); detail != "" {
+			if message != "" {
+				message += ": "
+			}
+			message += detail
+		}
+		if code := strings.TrimSpace(apiErr.Code); code != "" {
+			if message != "" {
+				message += " "
+			}
+			message += "[" + code + "]"
+		}
+		if message != "" {
+			return fmt.Errorf("apple music api error: %s: %s", status, message)
+		}
+	}
+
+	return fmt.Errorf("apple music api error: %s", status)
+}
+
 // FetchRecentPlayedTracks calls Apple Music API for a user token
 func (s *Service) FetchRecentPlayedTracks(ctx context.Context, userToken string, limit int) ([]AppleRecentTrack, error) {
-	if limit <= 0 || limit > 50 {
+	if limit <= 0 || limit > 30 {
 		limit = 25
 	}
 	devToken, _, err := s.GenerateDeveloperToken()
@@ -310,6 +345,7 @@ func (s *Service) FetchRecentPlayedTracks(ctx context.Context, userToken string,
 	endpoint := &url.URL{Scheme: "https", Host: "api.music.apple.com", Path: "/v1/me/recent/played/tracks"}
 	q := endpoint.Query()
 	q.Set("limit", fmt.Sprintf("%d", limit))
+	q.Set("types", "songs,library-songs")
 	endpoint.RawQuery = q.Encode()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
@@ -330,14 +366,13 @@ func (s *Service) FetchRecentPlayedTracks(ctx context.Context, userToken string,
 		}
 	}(resp.Body)
 
-	// Read the full response body to log it
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response body: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("apple music api error: %s", resp.Status)
+		return nil, newAppleMusicAPIError(resp.Status, bodyBytes)
 	}
 
 	var parsed recentPlayedResponse
@@ -406,7 +441,106 @@ func (s *Service) GetCurrentAppleMusicTrack(ctx context.Context, user *models.Us
 		return nil, nil
 	}
 
+	// Library songs may omit attributes.url even when they correspond to a
+	// catalog song. Resolve the catalog URL before the track is persisted.
+	if err := s.populateCatalogURL(ctx, *user.AppleMusicUserToken, &items[0]); err != nil {
+		s.logger.Printf("failed to resolve Apple Music catalog URL for %q: %v", items[0].Attributes.Name, err)
+	}
+
 	return &items[0], nil
+}
+
+// populateCatalogURL fills in the share URL for a library song when Apple
+// provides the corresponding catalog ID in its play parameters.
+func (s *Service) populateCatalogURL(ctx context.Context, userToken string, track *AppleRecentTrack) error {
+	if track == nil || track.Attributes.URL != "" || track.Attributes.PlayParams == nil || track.Attributes.PlayParams.CatalogID == "" {
+		return nil
+	}
+
+	devToken, _, err := s.GenerateDeveloperToken()
+	if err != nil {
+		return err
+	}
+
+	storefrontEndpoint := &url.URL{Scheme: "https", Host: "api.music.apple.com", Path: "/v1/me/storefront"}
+	storefrontReq, err := http.NewRequestWithContext(ctx, http.MethodGet, storefrontEndpoint.String(), nil)
+	if err != nil {
+		return err
+	}
+	storefrontReq.Header.Set("Authorization", "Bearer "+devToken)
+	storefrontReq.Header.Set("Music-User-Token", userToken)
+
+	storefrontResp, err := s.httpClient.Do(storefrontReq)
+	if err != nil {
+		return err
+	}
+	defer storefrontResp.Body.Close()
+
+	storefrontBody, err := io.ReadAll(storefrontResp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read storefront response: %w", err)
+	}
+	if storefrontResp.StatusCode != http.StatusOK {
+		return newAppleMusicAPIError(storefrontResp.Status, storefrontBody)
+	}
+
+	var storefront struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(storefrontBody, &storefront); err != nil {
+		return fmt.Errorf("failed to decode storefront response: %w", err)
+	}
+	if len(storefront.Data) == 0 || storefront.Data[0].ID == "" {
+		return errors.New("Apple Music storefront response contained no storefront")
+	}
+
+	catalogEndpoint := &url.URL{
+		Scheme: "https",
+		Host:   "api.music.apple.com",
+		Path:   "/v1/catalog/" + url.PathEscape(storefront.Data[0].ID) + "/songs",
+	}
+	query := catalogEndpoint.Query()
+	query.Set("ids", track.Attributes.PlayParams.CatalogID)
+	catalogEndpoint.RawQuery = query.Encode()
+
+	catalogReq, err := http.NewRequestWithContext(ctx, http.MethodGet, catalogEndpoint.String(), nil)
+	if err != nil {
+		return err
+	}
+	catalogReq.Header.Set("Authorization", "Bearer "+devToken)
+
+	catalogResp, err := s.httpClient.Do(catalogReq)
+	if err != nil {
+		return err
+	}
+	defer catalogResp.Body.Close()
+
+	catalogBody, err := io.ReadAll(catalogResp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read catalog song response: %w", err)
+	}
+	if catalogResp.StatusCode != http.StatusOK {
+		return newAppleMusicAPIError(catalogResp.Status, catalogBody)
+	}
+
+	var catalog struct {
+		Data []struct {
+			Attributes struct {
+				URL string `json:"url"`
+			} `json:"attributes"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(catalogBody, &catalog); err != nil {
+		return fmt.Errorf("failed to decode catalog song response: %w", err)
+	}
+	if len(catalog.Data) == 0 || catalog.Data[0].Attributes.URL == "" {
+		return errors.New("Apple Music catalog response contained no song URL")
+	}
+
+	track.Attributes.URL = catalog.Data[0].Attributes.URL
+	return nil
 }
 
 // ProcessUser checks for new Apple Music tracks and processes them

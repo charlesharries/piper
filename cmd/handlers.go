@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/spf13/viper"
 	"github.com/teal-fm/piper/db"
 	"github.com/teal-fm/piper/db/apikey"
 	"github.com/teal-fm/piper/models"
@@ -17,6 +16,8 @@ import (
 	"github.com/teal-fm/piper/pages"
 	"github.com/teal-fm/piper/service/applemusic"
 	atprotoservice "github.com/teal-fm/piper/service/atproto"
+	"github.com/teal-fm/piper/service/bsky"
+	"github.com/teal-fm/piper/service/lastfm"
 	"github.com/teal-fm/piper/service/musicbrainz"
 	"github.com/teal-fm/piper/service/playingnow"
 	"github.com/teal-fm/piper/service/spotify"
@@ -24,41 +25,87 @@ import (
 )
 
 type HomeParams struct {
-	NavBar pages.NavBar
+	NavBar    pages.NavBar
+	BuildTime time.Time
 }
 
-func home(database *db.DB, pg *pages.Pages) http.HandlerFunc {
+func home(database *db.DB, pg *pages.Pages, lastfmService *lastfm.Service, buildTime time.Time) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 
 		w.Header().Set("Content-Type", "text/html")
 
-		userID, authenticated := session.GetUserID(r.Context())
-		isLoggedIn := authenticated
-		lastfmUsername := ""
+		userID, isLoggedIn := session.GetUserID(r.Context())
 
+		var user *models.User
 		if isLoggedIn {
-			user, err := database.GetUserByID(userID)
-			fmt.Printf("User: %+v\n", user)
-			if err == nil && user != nil && user.LastFMUsername != nil {
-				lastfmUsername = *user.LastFMUsername
-			} else if err != nil {
+			var err error
+			user, err = database.GetUserByID(userID)
+			if err != nil {
 				log.Printf("Error fetching user %d details for home page: %v", userID, err)
 			}
+			user = backfillProfile(r.Context(), database, user)
+			user = backfillLastFMAvatar(r.Context(), database, lastfmService, user)
 		}
+
 		params := HomeParams{
-			NavBar: pages.NavBar{
-				IsLoggedIn:        isLoggedIn,
-				LastFMUsername:    lastfmUsername,
-				SpotifyEnabled:    viper.GetBool("enable_spotify"),
-				LastFMEnabled:     viper.GetBool("enable_lastfm"),
-				AppleMusicEnabled: viper.GetBool("enable_applemusic"),
-			},
+			NavBar:    pages.NewNavBar(user, isLoggedIn),
+			BuildTime: buildTime,
 		}
 		err := pg.Execute("home", w, params)
 		if err != nil {
 			log.Printf("Error executing template: %v", err)
 		}
 	}
+}
+
+// backfillProfile fills in the cached handle and avatar for users who logged in
+// before piper started storing them. Profiles are normally cached during the
+// ATProto callback, so this runs at most once per user and is best-effort: on
+// failure the nav bar just falls back to a placeholder.
+func backfillProfile(ctx context.Context, database *db.DB, user *models.User) *models.User {
+	if user == nil || user.ATProtoDID == nil || user.ProfileFetchedAt != nil {
+		return user
+	}
+
+	profile, err := bsky.FetchProfile(ctx, nil, *user.ATProtoDID)
+	if err != nil {
+		log.Printf("Error fetching profile for DID %s: %v", *user.ATProtoDID, err)
+		return user
+	}
+
+	if err := database.SaveATProtoProfile(*user.ATProtoDID, profile.Handle, profile.DisplayName, profile.Avatar); err != nil {
+		log.Printf("Error saving profile for DID %s: %v", *user.ATProtoDID, err)
+		return user
+	}
+
+	user.Handle = &profile.Handle
+	user.DisplayName = &profile.DisplayName
+	user.AvatarURL = &profile.Avatar
+	return user
+}
+
+// backfillLastFMAvatar caches the linked Last.fm account's picture. The cached
+// value is cleared whenever the username changes, so this refetches on a
+// re-link; otherwise it runs once and is best-effort. Accounts with no picture
+// cache an empty string, which stops us asking again on every page load.
+func backfillLastFMAvatar(ctx context.Context, database *db.DB, lastfmService *lastfm.Service, user *models.User) *models.User {
+	if user == nil || lastfmService == nil || user.LastFMUsername == nil || user.LastFMAvatarURL != nil {
+		return user
+	}
+
+	avatarURL, err := lastfmService.FetchAvatarURL(ctx, *user.LastFMUsername)
+	if err != nil {
+		log.Printf("Error fetching Last.fm avatar for %s: %v", *user.LastFMUsername, err)
+		return user
+	}
+
+	if err := database.SaveLastFMAvatarURL(user.ID, avatarURL); err != nil {
+		log.Printf("Error saving Last.fm avatar for %s: %v", *user.LastFMUsername, err)
+		return user
+	}
+
+	user.LastFMAvatarURL = &avatarURL
+	return user
 }
 
 func handleLinkLastfmForm(database *db.DB, pg *pages.Pages) http.HandlerFunc {
@@ -103,13 +150,7 @@ func handleLinkLastfmForm(database *db.DB, pg *pages.Pages) http.HandlerFunc {
 			NavBar          pages.NavBar
 			CurrentUsername string
 		}{
-			NavBar: pages.NavBar{
-				IsLoggedIn:        authenticated,
-				LastFMUsername:    currentUsername,
-				SpotifyEnabled:    viper.GetBool("enable_spotify"),
-				LastFMEnabled:     viper.GetBool("enable_lastfm"),
-				AppleMusicEnabled: viper.GetBool("enable_applemusic"),
-			},
+			NavBar:          pages.NewNavBar(currentUser, authenticated),
 			CurrentUsername: currentUsername,
 		}
 		err = pg.Execute("lastFMForm", w, pageParams)
@@ -147,27 +188,65 @@ func handleLinkLastfmSubmit(database *db.DB) http.HandlerFunc {
 	}
 }
 
-func handleAppleMusicLink(pg *pages.Pages, am *applemusic.Service) http.HandlerFunc {
+// handleUnlinkSpotify logs the user out of Spotify. Note that the application is still
+// authorised on the Spotify end!
+func handleUnlinkSpotify(database *db.DB, spotifyService *spotify.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		userID, _ := session.GetUserID(r.Context()) // Auth middleware ensures this exists
+
+		if err := database.ClearSpotifySession(userID); err != nil {
+			log.Printf("Error unlinking Spotify for user %d: %v", userID, err)
+			http.Error(w, "Failed to unlink Spotify", http.StatusInternalServerError)
+			return
+		}
+
+		if spotifyService != nil {
+			spotifyService.UnloadUser(userID)
+		}
+
+		log.Printf("Successfully unlinked Spotify for user ID %d", userID)
+
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+	}
+}
+
+func handleAppleMusicLink(database *db.DB, pg *pages.Pages, am *applemusic.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
+
+		// The service is left nil when Apple Music is enabled but its credentials
+		// are missing, the same as the Spotify and Last.fm services.
+		if am == nil {
+			http.Error(w, "Apple Music is not configured on this server", http.StatusServiceUnavailable)
+			return
+		}
+
 		devToken, _, errTok := am.GenerateDeveloperToken()
 		if errTok != nil {
 			log.Printf("Error generating Apple Music developer token: %v", errTok)
 			http.Error(w, "Failed to prepare Apple Music", http.StatusInternalServerError)
 			return
 		}
+
+		userID, authenticated := session.GetUserID(r.Context())
+		user, err := database.GetUserByID(userID)
+		if err != nil {
+			log.Printf("Error fetching user %d for Apple Music link page: %v", userID, err)
+		}
+
 		data := struct {
 			NavBar   pages.NavBar
 			DevToken string
 		}{
 			DevToken: devToken,
-			NavBar: pages.NavBar{
-				SpotifyEnabled:    viper.GetBool("enable_spotify"),
-				LastFMEnabled:     viper.GetBool("enable_lastfm"),
-				AppleMusicEnabled: viper.GetBool("enable_applemusic"),
-			},
+			NavBar:   pages.NewNavBar(user, authenticated),
 		}
-		err := pg.Execute("applemusic_link", w, data)
+		err = pg.Execute("applemusic_link", w, data)
 		if err != nil {
 			log.Printf("Error executing template: %v", err)
 		}

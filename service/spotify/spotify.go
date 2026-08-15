@@ -21,7 +21,7 @@ import (
 	// Added for atproto.RepoCreateRecord_Input
 	// Added for lexutil.LexiconTypeDecoder
 	// Added for xrpc.Client
-	"github.com/spf13/viper" // Added for teal.AlphaFeedPlay
+	"github.com/spf13/viper" // Added for teal.FeedPlay
 	"github.com/teal-fm/piper/db"
 	"github.com/teal-fm/piper/models"
 	atprotoauth "github.com/teal-fm/piper/oauth/atproto"
@@ -216,6 +216,14 @@ func (s *Service) UnloadAllUsers() error {
 	defer s.mu.Unlock()
 	s.userTokens = make(map[int64]string)
 	return nil
+}
+
+// UnloadUser drops a single user's cached token and play state.
+func (s *Service) UnloadUser(userID int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.userTokens, userID)
+	delete(s.userPlayStates, userID)
 }
 
 // refreshTokenInner handles the actual Spotify token refresh logic.
