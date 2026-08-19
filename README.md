@@ -56,6 +56,10 @@ You now have to bring your own private key to run piper. Can do this via goat `g
 
 - `LASTFM_API_KEY` - Your lastfm api key. Can find out how to setup [here](https://www.last.fm/api)
 
+- `LISTENBRAINZ_TOKEN` - Optional. A ListenBrainz user token from [your profile](https://listenbrainz.org/profile/). When set, piper resolves plays to MusicBrainz IDs using ListenBrainz's metadata lookup before falling back to searching MusicBrainz, which matches messy metadata from streaming services more reliably. Piper works without it.
+
+- `SUBMISSION_AGENT` - Optional. How piper identifies itself, both in the `submissionClientAgent` field of submitted plays and in the User-Agent it sends to MusicBrainz and ListenBrainz. Format is `<app-identifier>/<version>`, e.g. `piper/v0.0.7`. Defaults to this build's own version, so set it if you are running a fork or a repackaged build.
+
 - `TRACKER_INTERVAL` - How long between checks to see if the registered users are listening to new music
 - `DB_PATH` - Path for the sqlite db. If you are using the docker compose probably want `/db/piper.db` to persist data
 - `ALLOWED_DIDS` - Restricts the ATProto accounts that can sign-in to the instance to a specific list of DIDs. Supply full DIDs as a space-separated list (e.g., `ALLOWED_DIDS=did:plc:abcdefg did:web:example.com`).
@@ -95,6 +99,20 @@ which is imported on the [./pages/templates/layouts/base.gohtml](./pages/templat
 
 1. Install tailwindcss cli `npm install tailwindcss @tailwindcss/cli`
 2. run `npx @tailwindcss/cli -i ./pages/static/base.css -o ./pages/static/main.css --watch`
+
+#### cover art
+
+`fm.teal.alpha.feed.play` has no artwork field, and the Cover Art Archive is keyed on releases rather than recordings. `releaseMbId` is therefore the only identifier in a play record that resolves to a cover, so consumers can build the URL themselves — strip the `mbid:` prefix and ask for the size you want:
+
+```
+https://coverartarchive.org/release/<uuid>/front-250
+https://coverartarchive.org/release/<uuid>/front-500
+https://coverartarchive.org/release/<uuid>/front-1200
+```
+
+Each 307-redirects to the image, or 404s when that release has no cover. `recordingMbId` and `artistMbId` have no artwork; don't try them.
+
+Artwork is uploaded per pressing and most pressings have none, so which release piper picks decides whether that URL works. Release selection therefore scores artwork availability alongside the metadata signals (see [`service/musicbrainz/coverart.go`](./service/musicbrainz/coverart.go)) and prefers a pressing the archive holds a cover for, provided it is an equally good answer for the album. Getting the right album still wins over getting a cover.
 
 #### Lexicon changes
 

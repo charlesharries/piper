@@ -1,6 +1,7 @@
 package spotify
 
 import (
+	"cmp"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -670,7 +671,13 @@ func (s *Service) computeStateUpdate(userID int64, resp *SpotifyTrackResponse) s
 		}
 		state = s.userPlayStates[userID]
 		action.publishNowPlaying = true
-		s.logger.Printf("Track changed for user %d: %s by %s", userID, track.Name, getFirstArtist(track))
+		// The ISRC is logged because it is the only signal that reliably matches
+		// a play whose title or artist MusicBrainz holds in a different script
+		// or language, where no amount of string comparison can bridge the two.
+		// When one of those fails to match, this says whether Spotify gave us an
+		// ISRC to match on at all.
+		s.logger.Printf("Track changed for user %d: %s by %s (isrc: %s)",
+			userID, track.Name, getFirstArtist(track), cmp.Or(track.ISRC, "<none>"))
 	} else {
 		// Same song continuing
 		state.track = track

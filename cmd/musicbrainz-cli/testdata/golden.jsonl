@@ -1,0 +1,56 @@
+{"name":"Bohemian Rhapsody","artist":"Queen","album":"A Night at the Opera (2011 Remaster)","isrc":"GBUM71029604","duration_ms":355106,"note":"isrc + remaster suffix","expect_recording_mbid":"b1a9c0e9-d987-4042-ae91-78d6a3267d69","expect_release_title":"A Night at the Opera"}
+{"name":"Loser","artist":"Tame Impala","album":"Deadbeat","isrc":"USQX92505503","duration_ms":223070,"note":"isrc, from local history","expect_recording_mbid":"ec87b2e6-3d7e-4121-96a3-051fe779de6f","expect_release_title":"Deadbeat"}
+
+{"name":"Dreams","artist":"Fleetwood Mac","album":"Rumours (Super Deluxe)","duration_ms":257800,"note":"outtake trap + deluxe suffix","expect_recording_title":"Dreams","expect_release_title":"Rumours"}
+{"name":"Dreams - 2004 Remaster","artist":"Fleetwood Mac","album":"Rumours","duration_ms":257800,"note":"remaster suffix on the track","expect_recording_title":"Dreams","expect_release_title":"Rumours"}
+{"name":"Go Your Own Way","artist":"Fleetwood Mac","album":"Rumours","duration_ms":223000,"note":"same album, plain","expect_recording_title":"Go Your Own Way","expect_release_title":"Rumours"}
+
+{"name":"Blue Monday","artist":"New Order","album":"Power, Corruption & Lies","duration_ms":450000,"note":"release titled 'Power Corruption and Lies'","expect_recording_title":"Blue Monday","expect_release_title":"Power, Corruption & Lies"}
+{"name":"Age of Consent","artist":"New Order","album":"Power, Corruption & Lies","duration_ms":304000,"note":"ampersand + comma in album","expect_recording_title":"Age of Consent","expect_release_title":"Power, Corruption & Lies"}
+
+{"name":"I Can See Clearly Now","artist":"Jimmy Cliff","album":"Cool Runnings: Music From The Motion Picture","duration_ms":197000,"note":"local history regressed to a junk compilation","expect_recording_title":"I Can See Clearly Now","expect_release_title":"Cool Runnings: Music From the Motion Picture"}
+
+{"name":"Hooked on a Feeling","artist":"Blue Swede","album":"Guardians of the Galaxy: Awesome Mix Vol. 1","duration_ms":173000,"note":"soundtrack","expect_recording_title":"Hooked on a Feeling","expect_release_title":"Guardians of the Galaxy: Awesome Mix, Vol. 1"}
+{"name":"Come and Get Your Love","artist":"Redbone","album":"Guardians of the Galaxy: Awesome Mix Vol. 1","duration_ms":214000,"note":"soundtrack","expect_recording_title":"Come and Get Your Love","expect_release_title":"Guardians of the Galaxy: Awesome Mix, Vol. 1"}
+
+{"name":"Don't Stop Me Now","artist":"Queen","album":"Greatest Hits","duration_ms":209000,"note":"the album really is a compilation","expect_recording_title":"Don't Stop Me Now","expect_release_title":"Greatest Hits"}
+
+{"name":"One Kiss","artist":"Calvin Harris;Dua Lipa","album":"One Kiss","duration_ms":214846,"note":"two credited artists","expect_recording_title":"One Kiss","expect_release_title":"One Kiss"}
+{"name":"Ni**as In Paris","artist":"JAY-Z;Kanye West","album":"Watch The Throne","duration_ms":219333,"note":"censored title + collab","expect_release_title":"Watch the Throne"}
+
+{"name":"Stay (feat. Bryan Adams)","artist":"The Kid LAROI;Justin Bieber","album":"F*CK LOVE 3: OVER YOU","duration_ms":141805,"note":"feat suffix that is not on the MB title","expect_recording_title":"Stay"}
+{"name":"Empire State of Mind (feat. Alicia Keys)","artist":"JAY-Z","album":"The Blueprint 3","duration_ms":276600,"note":"feat suffix","expect_recording_title":"Empire State of Mind","expect_release_title":"The Blueprint 3"}
+
+{"name":"Whole Lotta Love","artist":"Led Zeppelin","album":"How the West Was Won","duration_ms":1400000,"note":"live album, live recording is correct","expect_release_title":"How the West Was Won"}
+{"name":"Whole Lotta Love","artist":"Led Zeppelin","album":"Led Zeppelin II","duration_ms":333000,"note":"studio album must not get the live take","expect_recording_title":"Whole Lotta Love","expect_release_title":"Led Zeppelin II"}
+
+{"name":"シェリー","artist":"尾崎豊","album":"回帰線","duration_ms":345720,"note":"japanese title and artist","expect_recording_title":"シェリー","expect_release_title":"回帰線"}
+{"name":"Плот","artist":"Юрий Лоза","album":"Что сказано, то сказано","duration_ms":316000,"note":"cyrillic title and artist","expect_recording_title":"Плот"}
+
+{"name":"Say \"Yes\"","artist":"Floetry","album":"Floetic","duration_ms":260000,"note":"double quotes in the title","expect_release_title":"Floetic"}
+{"name":"'Till I Collapse","artist":"Eminem","album":"The Eminem Show","duration_ms":297786,"note":"leading apostrophe","expect_recording_title":"'Till I Collapse","expect_release_title":"The Eminem Show"}
+
+{"name":"The Four Seasons, Violin Concerto in E Major, RV 269 \"Spring\": I. Allegro","artist":"Antonio Vivaldi","album":"Vivaldi: The Four Seasons","duration_ms":205000,"note":"classical, long structured title"}
+
+{"name":"asdfgh","artist":"qwerty","album":"zxcvbn","note":"nonsense","expect_no_match":true}
+{"name":"","artist":"","album":"","note":"empty input","expect_no_match":true}
+
+{"name": "Stability", "artist": "Death Cab for Cutie", "album": "The Stability EP", "duration_ms": 741000, "note": "EP track catalogued as a medley", "expect_release_title": "The Stability EP"}
+
+{"name":"Blade Runner Blues","artist":"Vangelis","album":"Blade Runner (Music From The Original Soundtrack)","duration_ms":534400,"note":"bootleg cut is 85s longer","expect_recording_mbid":"48bab008-288c-49b0-94e1-694849a5e7dd","expect_release_title":"Blade Runner"}
+{"name":"Memories of Green","artist":"Vangelis","album":"Blade Runner (Music From The Original Soundtrack)","duration_ms":305026,"note":"bootleg cut is 41s longer","expect_recording_mbid":"fd19347b-11f6-432e-a72c-af77ca7f1b4f","expect_release_title":"Blade Runner"}
+{"name":"Rachel's Song","artist":"Vangelis","album":"Blade Runner (Music From The Original Soundtrack)","duration_ms":288000,"note":"bootleg cut is 32s shorter","expect_recording_mbid":"c35eefc6-2b9d-4d12-b998-20570656013f","expect_release_title":"Blade Runner"}
+{"name":"Main Titles","artist":"Vangelis","album":"Blade Runner (Music From The Original Soundtrack)","duration_ms":222373,"note":"generic title shared with other Vangelis soundtracks","expect_recording_mbid":"019a1378-2cdc-4425-95f4-f84733872e05","expect_release_title":"Blade Runner"}
+{"name":"Wait for Me","artist":"Vangelis","album":"Blade Runner (Music From The Original Soundtrack)","duration_ms":327533,"note":"generic title, must not land on a compilation","expect_recording_mbid":"d5e67b1f-8814-43da-8ded-5f0370c70d14","expect_release_title":"Blade Runner"}
+{"name":"Damask Rose","artist":"Vangelis","album":"Blade Runner (Music From The Original Soundtrack)","duration_ms":152826,"note":"control: same album, already resolves","expect_recording_mbid":"88ff5a9f-d8f4-461c-939e-c153f49d903c","expect_release_title":"Blade Runner"}
+
+{"name":"Kintsugi","artist":"MEITEI","album":"Kofū","duration_ms":66061,"note":"artist catalogued as 冥丁; only the credit line is Latin","expect_recording_mbid":"24ec5ef4-b46b-41f3-b781-720cc279258f"}
+{"name":"Distant Horizon (feat. Nao Kodama)","artist":"RYUSENKEI; Nao Kodama","album":"Time Machine Love 2003–25 RYUSENKEI","isrc":"TCJPW2333297","duration_ms":249453,"note":"Spotify translates the title; MusicBrainz has only 遠い水平線 with no alias, so the ISRC is the only bridge","expect_recording_mbid":"1ab05302-bd90-4331-999b-2ba3f99b4116"}
+{"name":"I'm in Love","artist":"Tomoko Aran","album":"浮遊空間","isrc":"JPWP09402390","duration_ms":353000,"note":"artist catalogued as 亜蘭知子; searching the Latin name returns only a DJ mix","expect_recording_mbid":"8791cd85-a643-48c0-ae77-2015f296cc40","expect_release_title":"浮遊空間"}
+{"name":"I'm in Love","artist":"Tomoko Aran","album":"浮遊空間","duration_ms":353000,"note":"same play without the ISRC: only the artist MBID reaches 亜蘭知子's catalogue, and a 25-song DJ mix titled with its tracklist must not pass for it","expect_recording_mbid":"8791cd85-a643-48c0-ae77-2015f296cc40","expect_release_title":"浮遊空間"}
+{"name":"Drive My Car","artist":"Eiko Ishibashi","album":"Drive My Car Original Soundtrack","duration_ms":304390,"note":"artist catalogued as 石橋英子; the title is the Beatles song, so the fuzzy tier drowns in covers","expect_recording_mbid":"2741a2e7-28ad-435c-9b06-a707f5dcb81e","expect_release_title":"Drive My Car Original Soundtrack"}
+{"name":"Drive My Car (Misaki)","artist":"Eiko Ishibashi","album":"Drive My Car Original Soundtrack","duration_ms":147120,"note":"same album; a title distinctive enough that the fuzzy tier used to reach it, where the plain one never did","expect_recording_mbid":"96659c85-df16-4602-a064-6ecfd61ba303","expect_release_title":"Drive My Car Original Soundtrack"}
+
+{"name":"I Am Trying to Break Your Heart - 2022 Remaster","artist":"Wilco","album":"Yankee Hotel Foxtrot (Expanded Edition)","duration_ms":417506,"note":"the edition suffix emptied the album tier, leaving 234 live takes to rank","expect_recording_title":"I Am Trying to Break Your Heart","expect_release_title":"Yankee Hotel Foxtrot"}
+{"name":"Jesus, Etc. - 2022 Remaster","artist":"Wilco","album":"Yankee Hotel Foxtrot (Expanded Edition)","duration_ms":231800,"note":"same album and suffix; used to pass only because ListenBrainz answered first","expect_recording_title":"Jesus, Etc.","expect_release_title":"Yankee Hotel Foxtrot"}
+{"name":"Heavy Metal Drummer - 2022 Remaster","artist":"Wilco","album":"Yankee Hotel Foxtrot (Expanded Edition)","duration_ms":188973,"note":"control: same album, must stay on the studio pressing","expect_recording_title":"Heavy Metal Drummer","expect_release_title":"Yankee Hotel Foxtrot"}
