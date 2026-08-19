@@ -89,6 +89,13 @@ func TrackToPlayRecord(track *models.Track) (*teal.FeedPlay, error) {
 		releaseNamePtr = &track.Album
 	}
 
+	// Resolving to the base release drops the edition the service reported, so
+	// carry it through rather than losing that a remaster was played.
+	var discriminantPtr *string
+	if track.ReleaseDiscriminant != "" {
+		discriminantPtr = &track.ReleaseDiscriminant
+	}
+
 	submissionAgent := models.SubmissionAgent()
 
 	playRecord := &teal.FeedPlay{
@@ -100,6 +107,7 @@ func TrackToPlayRecord(track *models.Track) (*teal.FeedPlay, error) {
 		RecordingMbId:         models.FormatMBIDURI(track.RecordingMBID),
 		ReleaseMbId:           models.FormatMBIDURI(track.ReleaseMBID),
 		ReleaseName:           releaseNamePtr,
+		ReleaseDiscriminant:   discriminantPtr,
 		Isrc:                  isrcPtr,
 		OriginUri:             originURI,
 		MusicServiceUri:       serviceURI,

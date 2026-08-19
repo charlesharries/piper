@@ -227,3 +227,27 @@ func TestReleaseDiscriminant(t *testing.T) {
 		})
 	}
 }
+
+func TestSearchAlbum(t *testing.T) {
+	tests := []struct {
+		album string
+		want  string
+	}{
+		{album: "Yankee Hotel Foxtrot (Expanded Edition)", want: "Yankee Hotel Foxtrot"},
+		{album: "Rumours (Super Deluxe)", want: "Rumours"},
+		{album: "Abbey Road - 2019 Remaster", want: "Abbey Road"},
+		{album: "Yankee Hotel Foxtrot", want: "Yankee Hotel Foxtrot"},
+		// Not an edition, so the parenthetical is part of the album's name.
+		{album: "Blade Runner (Music From The Original Soundtrack)", want: "Blade Runner (Music From The Original Soundtrack)"},
+		{album: "(What's the Story) Morning Glory?", want: "(What's the Story) Morning Glory?"},
+		{album: "", want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.album, func(t *testing.T) {
+			if got := searchAlbum(tt.album); got != tt.want {
+				t.Errorf("searchAlbum(%q) = %q, want %q", tt.album, got, tt.want)
+			}
+		})
+	}
+}

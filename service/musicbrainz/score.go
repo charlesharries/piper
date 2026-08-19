@@ -2,6 +2,7 @@ package musicbrainz
 
 import (
 	"fmt"
+	"log/slog"
 	"math"
 	"sort"
 	"strings"
@@ -130,9 +131,17 @@ func similarity(a, b string) float64 {
 }
 
 // splitQualifier separates a title from a trailing variant qualifier, e.g.
-// "Dreams (outtake)" or "Dreams - 2004 Remaster". The qualifier is returned
+// "Dreams (outtake)" or "Dreams - 2004 Remaster". Both halves are returned
 // normalized; an empty qualifier means the title carries none.
 func splitQualifier(title string) (base, qualifier string) {
+	rawBase, rawQualifier := splitQualifierRaw(title)
+	return normalize(rawBase), normalize(rawQualifier)
+}
+
+// splitQualifierRaw is splitQualifier without the normalizing, for callers that
+// need the title as written -- a search query, which MusicBrainz matches against
+// titles as they are catalogued.
+func splitQualifierRaw(title string) (base, qualifier string) {
 	trimmed := strings.TrimSpace(title)
 
 	// Bracketed suffix: (...), [...], {...}
@@ -142,7 +151,7 @@ func splitQualifier(title string) (base, qualifier string) {
 		}
 		if idx := strings.LastIndex(trimmed, pair.open); idx > 0 {
 			inner := trimmed[idx+len(pair.open) : len(trimmed)-len(pair.close)]
-			return normalize(trimmed[:idx]), normalize(inner)
+			return strings.TrimSpace(trimmed[:idx]), strings.TrimSpace(inner)
 		}
 	}
 
@@ -150,11 +159,11 @@ func splitQualifier(title string) (base, qualifier string) {
 	// the dash is surrounded by spaces, so hyphenated titles survive intact.
 	for _, sep := range []string{" - ", " – ", " — "} {
 		if idx := strings.LastIndex(trimmed, sep); idx > 0 {
-			return normalize(trimmed[:idx]), normalize(trimmed[idx+len(sep):])
+			return strings.TrimSpace(trimmed[:idx]), strings.TrimSpace(trimmed[idx+len(sep):])
 		}
 	}
 
-	return normalize(trimmed), ""
+	return trimmed, ""
 }
 
 // isVariantQualifier reports whether a qualifier marks a different version of a
@@ -426,26 +435,65 @@ func (in matchInput) compareAlbum(title string) float64 {
 	)
 }
 
+// signal is one component of a score: what was compared, and how well it
+// agreed. Penalties are negative.
+type signal struct {
+	name  string
+	value float64
+}
+
+// signals is a score's full breakdown, in the order the components were
+// applied. It renders as "title=1.00 artist=0.93" for the CLI, and expands into
+// sig_* attributes for logs, so a bad match can be queried by the signal that
+// let it through rather than only read by eye.
+type signals []signal
+
+func (s signals) String() string {
+	parts := make([]string, len(s))
+	for i, sig := range s {
+		parts[i] = fmt.Sprintf("%s=%.2f", sig.name, sig.value)
+	}
+	return strings.Join(parts, " ")
+}
+
+// attrs renders the breakdown as slog attributes, prefixed so that a signal
+// named after a field the log line already carries -- title, artist, album --
+// cannot collide with it.
+func (s signals) attrs() []any {
+	attrs := make([]any, len(s))
+	for i, sig := range s {
+		attrs[i] = slog.Float64("sig_"+sig.name, logRound(sig.value))
+	}
+	return attrs
+}
+
+// logRound trims a score to the precision worth reading. Float64's full
+// seventeen digits are noise in a log line, but rounding coarsely enough to
+// print 0.619 as 0.62 would hide why a candidate fell short of minConfidence.
+func logRound(v float64) float64 {
+	return math.Round(v*1000) / 1000
+}
+
 // scoreRecording rates a candidate in [0,1] against the incoming play and
 // returns a human-readable breakdown for the -explain CLI flag and logs.
-func scoreRecording(in matchInput, rec Recording) (float64, []string) {
+func scoreRecording(in matchInput, rec Recording) (float64, signals) {
 	// An ISRC is a globally unique identifier for a recording. If the candidate
 	// carries the one the service gave us, nothing else needs checking.
 	if in.isrc != "" {
 		for _, isrc := range rec.ISRCs {
 			if strings.EqualFold(strings.TrimSpace(isrc), in.isrc) {
-				return 1, []string{"isrc=exact"}
+				return 1, signals{{"isrc", 1}}
 			}
 		}
 	}
 
 	var weighted, total float64
-	reasons := make([]string, 0, 6)
+	reasons := make(signals, 0, 6)
 
 	add := func(name string, score, weight float64) {
 		weighted += score * weight
 		total += weight
-		reasons = append(reasons, fmt.Sprintf("%s=%.2f", name, score))
+		reasons = append(reasons, signal{name, score})
 	}
 
 	title, unmatchedVariant := in.titleScore(rec.Title)
@@ -482,19 +530,19 @@ func scoreRecording(in matchInput, rec Recording) (float64, []string) {
 	score := weighted / total
 	if unmatchedVariant {
 		score -= qualifierPenalty
-		reasons = append(reasons, fmt.Sprintf("variant=-%.2f", qualifierPenalty))
+		reasons = append(reasons, signal{"variant", -qualifierPenalty})
 	}
 	if rec.Video {
 		score -= qualifierPenalty
-		reasons = append(reasons, fmt.Sprintf("video=-%.2f", qualifierPenalty))
+		reasons = append(reasons, signal{"video", -qualifierPenalty})
 	}
 	if durationConflict {
 		score -= durationConflictPenalty
-		reasons = append(reasons, fmt.Sprintf("conflict=-%.2f", durationConflictPenalty))
+		reasons = append(reasons, signal{"conflict", -durationConflictPenalty})
 	}
 	if !corroborated {
 		score -= uncorroboratedPenalty
-		reasons = append(reasons, fmt.Sprintf("uncorroborated=-%.2f", uncorroboratedPenalty))
+		reasons = append(reasons, signal{"uncorroborated", -uncorroboratedPenalty})
 	}
 
 	return math.Max(0, score), reasons
@@ -505,7 +553,7 @@ type candidate struct {
 	recording Recording
 	release   *Release
 	score     float64
-	reasons   []string
+	reasons   signals
 }
 
 func (c candidate) explain() string {
@@ -515,7 +563,7 @@ func (c candidate) explain() string {
 		release = c.release.Title
 	}
 	return fmt.Sprintf("%.3f  %-45s  %-35s  [%s]",
-		c.score, truncate(title, 45), truncate(release, 35), strings.Join(c.reasons, " "))
+		c.score, truncate(title, 45), truncate(release, 35), c.reasons)
 }
 
 func truncate(s string, n int) string {

@@ -1,7 +1,6 @@
 package musicbrainz
 
 import (
-	"fmt"
 	"strings"
 )
 
@@ -38,14 +37,14 @@ var preferredCountries = map[string]bool{"XW": true, "US": true, "GB": true, "XE
 // scoreRelease rates one release as the album to attribute a play to.
 // artOwners, when non-empty, is the set of release MBIDs already known to have
 // cover art (currently supplied by ListenBrainz).
-func scoreRelease(in matchInput, r Release, trackTitle string, artOwners map[string]bool) (float64, []string) {
+func scoreRelease(in matchInput, r Release, trackTitle string, artOwners map[string]bool) (float64, signals) {
 	var weighted, total float64
-	reasons := make([]string, 0, 5)
+	reasons := make(signals, 0, 5)
 
 	add := func(name string, score, weight float64) {
 		weighted += score * weight
 		total += weight
-		reasons = append(reasons, fmt.Sprintf("%s=%.2f", name, score))
+		reasons = append(reasons, signal{name, score})
 	}
 
 	titleScore := in.compareAlbum(r.Title)
@@ -104,11 +103,11 @@ func scoreRelease(in matchInput, r Release, trackTitle string, artOwners map[str
 	titleMatched := in.album != "" && titleScore >= 0.9
 	if r.ReleaseGroup != nil && len(r.ReleaseGroup.SecondaryTypes) > 0 && !titleMatched {
 		score -= releaseSecondaryPenalty
-		reasons = append(reasons, fmt.Sprintf("secondary=-%.2f", releaseSecondaryPenalty))
+		reasons = append(reasons, signal{"secondary", -releaseSecondaryPenalty})
 	}
 	if !titleMatched && trackTitle != "" && normalize(r.Title) == normalize(trackTitle) {
 		score -= releaseIsTrackTitlePenalty
-		reasons = append(reasons, fmt.Sprintf("single=-%.2f", releaseIsTrackTitlePenalty))
+		reasons = append(reasons, signal{"single", -releaseIsTrackTitlePenalty})
 	}
 
 	// Only penalise when the play named no edition at all. Someone playing
@@ -118,7 +117,7 @@ func scoreRelease(in matchInput, r Release, trackTitle string, artOwners map[str
 	if in.albumQualifier == "" {
 		if _, qualifier := splitQualifier(r.Title); isEditionQualifier(qualifier) {
 			score -= releaseVariantPenalty
-			reasons = append(reasons, fmt.Sprintf("edition=-%.2f", releaseVariantPenalty))
+			reasons = append(reasons, signal{"edition", -releaseVariantPenalty})
 		}
 	}
 
@@ -127,14 +126,14 @@ func scoreRelease(in matchInput, r Release, trackTitle string, artOwners map[str
 
 // bestRelease picks the release to attribute a play to by scoring an input
 // against a set of releases.
-func bestRelease(in matchInput, releases []Release, trackTitle string, artOwners map[string]bool) (*Release, float64, []string) {
+func bestRelease(in matchInput, releases []Release, trackTitle string, artOwners map[string]bool) (*Release, float64, signals) {
 	if len(releases) == 0 {
 		return nil, 0, nil
 	}
 
 	bestIdx := -1
 	var bestScore float64
-	var bestReasons []string
+	var bestReasons signals
 
 	for i := range releases {
 		score, reasons := scoreRelease(in, releases[i], trackTitle, artOwners)
@@ -188,19 +187,24 @@ func earlier(a, b Release) bool {
 // describes an edition of a release, not a different performance of a song.
 var editionWords = []string{
 	"anniversary", "bonus", "collector", "collectors", "complete", "deluxe",
-	"edition", "expanded", "limited", "platinum", "reissue", "special",
+	"edition", "expanded", "limited", "platinum", "reissue", "remaster",
+	"remastered", "special",
+}
+
+func hasEditionWord(qualifier string) bool {
+	for _, word := range editionWords {
+		if strings.Contains(qualifier, word) {
+			return true
+		}
+	}
+	return false
 }
 
 func isEditionQualifier(qualifier string) bool {
 	if qualifier == "" {
 		return false
 	}
-	for _, word := range editionWords {
-		if strings.Contains(qualifier, word) {
-			return true
-		}
-	}
-	return isVariantQualifier(qualifier)
+	return hasEditionWord(qualifier) || isVariantQualifier(qualifier)
 }
 
 // releaseDiscriminant reports the edition qualifier the service supplied that
@@ -213,4 +217,21 @@ func releaseDiscriminant(album string) string {
 		return ""
 	}
 	return strings.TrimSpace(qualifier)
+}
+
+// searchAlbum renders an album name for a lookup, dropping the edition a
+// service decorated it with. MusicBrainz phrase-matches release titles against
+// a subsequence, so "Rumours" finds the deluxe pressing too, where
+// "Rumours (Super Deluxe)" matches nothing. releaseDiscriminant keeps the
+// edition on the published play.
+//
+// Only an edition is dropped, not every qualifier isEditionQualifier would
+// recognise: "Blade Runner (Music From The Original Soundtrack)" names the
+// album rather than decorating it.
+func searchAlbum(album string) string {
+	base, qualifier := splitQualifierRaw(album)
+	if base == "" || !hasEditionWord(normalize(qualifier)) {
+		return album
+	}
+	return base
 }

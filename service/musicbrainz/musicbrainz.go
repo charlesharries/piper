@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -128,7 +128,7 @@ type Service struct {
 	listenbrainz ListenBrainzClient
 	cacheTTL     time.Duration
 	cleaner      MetadataCleaner
-	logger       *log.Logger
+	logger       *slog.Logger
 
 	// searchCache holds search and recording lookup results, keyed by endpoint.
 	searchCache *ttlCache[[]Recording]
@@ -153,6 +153,34 @@ func WithHTTPClient(c *http.Client) Option {
 	return func(s *Service) { s.httpClient = c }
 }
 
+// WithLogger replaces the logger, for callers that route logs somewhere other
+// than stderr or want them silenced.
+func WithLogger(l *slog.Logger) Option {
+	return func(s *Service) { s.logger = l }
+}
+
+// newLogger builds the service's logger. Matching fails quietly -- a play just
+// ends up carrying the wrong MBID -- so the logs are the only record of what was
+// decided, and they are written as key=value pairs for a log pipeline to parse
+// rather than as prose.
+//
+// Logs go to stderr, where the rest of piper's logging already goes, and out of
+// the way of the cli, which writes its result as JSON on stdout.
+func newLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel()}))
+}
+
+// logLevel reads the verbosity from LOG_LEVEL, defaulting to info. Cache hits
+// and request retries are logged at debug: they are useful when chasing a
+// specific bad match and noise the rest of the time.
+func logLevel() slog.Level {
+	level := slog.LevelInfo
+	if err := level.UnmarshalText([]byte(os.Getenv("LOG_LEVEL"))); err != nil {
+		return slog.LevelInfo
+	}
+	return level
+}
+
 // NewMusicBrainzService creates a new service instance with rate limiting and caching.
 func NewMusicBrainzService(db *db.DB, opts ...Option) *Service {
 	// MusicBrainz allows 1 request per second
@@ -160,10 +188,6 @@ func NewMusicBrainzService(db *db.DB, opts ...Option) *Service {
 
 	// Set a default cache TTL (e.g., 1 hour)
 	defaultCacheTTL := 1 * time.Hour
-
-	// the main piper service writes all output to stdout, but since the cli
-	// actually outputs JSON, logs should be written to stderr so they don't conflict.
-	logger := log.New(os.Stderr, "musicbrainz: ", log.LstdFlags|log.Lmsgprefix)
 
 	s := &Service{
 		db: db,
@@ -176,11 +200,15 @@ func NewMusicBrainzService(db *db.DB, opts ...Option) *Service {
 		artistCache:    newTTLCache[string](maxSearchCacheEntries),
 		cacheTTL:       defaultCacheTTL,              // Set the cache TTL
 		cleaner:        *NewMetadataCleaner("Latin"), // Initialize the cleaner
-		logger:         logger,
+		logger:         newLogger(),
 	}
 	for _, opt := range opts {
 		opt(s)
 	}
+	// Name the source on every line, whoever supplied the logger: once logs are
+	// shipped somewhere central, matching lines have to be separable from the
+	// trackers that feed plays into them.
+	s.logger = s.logger.With("service", "musicbrainz")
 	return s
 }
 
@@ -188,7 +216,7 @@ func NewMusicBrainzService(db *db.DB, opts ...Option) *Service {
 // MusicBrainz before accepting. ListenBrainz can be confidently wrong, so the
 // same scoring that guards search results guards its answers too.
 func (s *Service) resolveViaListenBrainz(ctx context.Context, in matchInput, track models.Track) (*Match, error) {
-	res, err := s.listenbrainz.Lookup(ctx, primaryArtist(track), track.Name, track.Album)
+	res, err := s.listenbrainz.Lookup(ctx, primaryArtist(track), track.Name, searchAlbum(track.Album))
 	if err != nil {
 		return nil, err
 	}
@@ -203,8 +231,12 @@ func (s *Service) resolveViaListenBrainz(ctx context.Context, in matchInput, tra
 
 	score, reasons := scoreRecording(in, *rec)
 	if score < minConfidence {
-		s.logger.Printf("rejected listenbrainz match %q for %q: %.2f < %.2f [%s]",
-			rec.Title, track.Name, score, minConfidence, strings.Join(reasons, " "))
+		attrs := trackAttrs(track)
+		attrs = append(attrs, recordingAttrs(*rec, nil)...)
+		attrs = append(attrs,
+			slog.Float64("score", logRound(score)),
+			slog.Float64("threshold", minConfidence))
+		s.logger.Info("rejected listenbrainz match", append(attrs, reasons.attrs()...)...)
 		return nil, nil
 	}
 
@@ -415,7 +447,8 @@ func (s *Service) doRequest(ctx context.Context, endpoint string, out any) error
 				return err
 			}
 			lastErr = err
-			s.logger.Printf("retrying %s after transport error: %v", endpoint, err)
+			s.logger.Debug("retrying request",
+				"endpoint", endpoint, "attempt", attempt+1, "err", err)
 			if !sleep(ctx, backoff(attempt)) {
 				return ctx.Err()
 			}
@@ -429,7 +462,8 @@ func (s *Service) doRequest(ctx context.Context, endpoint string, out any) error
 			if !retryable || attempt == maxAttempts-1 {
 				return lastErr
 			}
-			s.logger.Printf("retrying %s in %s after status %d", endpoint, delay, resp.StatusCode)
+			s.logger.Debug("retrying request",
+				"endpoint", endpoint, "attempt", attempt+1, "delay", delay, "status", resp.StatusCode)
 			if !sleep(ctx, delay) {
 				return ctx.Err()
 			}
@@ -463,10 +497,10 @@ func (s *Service) search(ctx context.Context, req searchRequest) ([]Recording, e
 	endpoint := buildSearchEndpoint(req)
 
 	if recordings, found := s.searchCache.get(endpoint); found {
-		s.logger.Printf("Cache hit for MusicBrainz search: %s", req.query)
+		s.logger.Debug("search cache hit", "query", req.query)
 		return recordings, nil
 	}
-	s.logger.Printf("Cache miss for MusicBrainz search: %s", req.query)
+	s.logger.Debug("search cache miss", "query", req.query)
 
 	var result SearchResponse
 	if err := s.doRequest(ctx, endpoint, &result); err != nil {
@@ -506,7 +540,7 @@ func (s *Service) artistMBID(ctx context.Context, name string) (string, error) {
 		// Not knowing who an artist is is as likely to be a gap MusicBrainz has
 		// since filled as a settled answer, so it is forgotten quickly.
 		mbid, ttl = "", negativeCacheTTL
-		s.logger.Printf("no MusicBrainz artist goes by %q", name)
+		s.logger.Info("no matching artist", "artist", name)
 	}
 	s.artistCache.put(endpoint, mbid, ttl)
 	return mbid, nil
@@ -521,7 +555,7 @@ func (s *Service) scopeTier(ctx context.Context, req searchRequest) (searchReque
 
 	mbid, err := s.artistMBID(ctx, req.scopeArtist)
 	if err != nil {
-		s.logger.Printf("artist lookup for %q failed: %v", req.scopeArtist, err)
+		s.logger.Warn("artist lookup failed", "artist", req.scopeArtist, "err", err)
 		return req, false
 	}
 	if mbid == "" {
@@ -557,9 +591,10 @@ func (s *Service) LookupRecording(ctx context.Context, mbid string) (*Recording,
 // candidate wins.
 func (s *Service) searchTiers(track models.Track) []searchRequest {
 	artist := primaryArtist(track)
+	album := searchAlbum(track.Album)
 	cleanTrack, _ := s.cleaner.CleanRecording(track.Name)
 	cleanArtist, _ := s.cleaner.CleanArtist(artist)
-	cleanAlbum, _ := s.cleaner.CleanRecording(track.Album)
+	cleanAlbum, _ := s.cleaner.CleanRecording(album)
 
 	var tiers []searchRequest
 	seen := map[string]bool{}
@@ -582,17 +617,15 @@ func (s *Service) searchTiers(track models.Track) []searchRequest {
 		addTier(SearchParams{ISRC: track.ISRC}, defaultSearchLimit)
 	}
 
-	// Cleaned metadata, narrowing from all three fields down to two. The album
-	// is dropped rather than trusted because services decorate it
-	// ("Rumours (Super Deluxe)") in ways MusicBrainz does not; from here on it
-	// is a scoring signal instead of a filter.
+	// Cleaned metadata, narrowing from all three fields down to two. Past that
+	// the album is a scoring signal instead of a filter.
 	addTier(SearchParams{Track: cleanTrack, Artist: cleanArtist, Release: cleanAlbum}, defaultSearchLimit)
 	addTier(SearchParams{Track: cleanTrack, Artist: cleanArtist}, 50)
 
 	// The cleaner is lossy: it truncates artist credits at the first comma and
 	// strips non-Latin script entirely. Retry with what the service actually
 	// sent us in case cleaning was what lost the match.
-	addTier(SearchParams{Track: track.Name, Artist: artist, Release: track.Album}, defaultSearchLimit)
+	addTier(SearchParams{Track: track.Name, Artist: artist, Release: album}, defaultSearchLimit)
 	addTier(SearchParams{Track: track.Name, Artist: artist}, 50)
 
 	// Every tier above finds an artist by the name they are catalogued under, so
@@ -626,6 +659,39 @@ func primaryArtist(track models.Track) string {
 		}
 	}
 	return strings.Join(names, ", ")
+}
+
+// trackAttrs describes the incoming play for a log line: what the music service
+// said the user played, before any of it was resolved.
+func trackAttrs(track models.Track) []any {
+	return []any{
+		slog.String("track", track.Name),
+		slog.String("artist", primaryArtist(track)),
+		slog.String("album", track.Album),
+	}
+}
+
+// recordingAttrs describes what a play was resolved to. The MBIDs are the point
+// of it: a title says a match looks plausible, an MBID says which of the many
+// recordings and pressings sharing that title was actually attached to the play,
+// which is what a wrong match has to be traced back to.
+func recordingAttrs(rec Recording, release *Release) []any {
+	attrs := []any{
+		slog.String("recording_mbid", rec.ID),
+		slog.String("recording", rec.Title),
+	}
+	if len(rec.ArtistCredit) > 0 {
+		attrs = append(attrs, slog.String("artist_mbid", rec.ArtistCredit[0].Artist.ID))
+	}
+	if release != nil {
+		attrs = append(attrs,
+			slog.String("release_mbid", release.ID),
+			slog.String("release", release.Title))
+		if release.ReleaseGroup != nil {
+			attrs = append(attrs, slog.String("release_group_mbid", release.ReleaseGroup.ID))
+		}
+	}
+	return attrs
 }
 
 // Match is the outcome of resolving a play against MusicBrainz.
@@ -668,7 +734,7 @@ func (s *Service) Resolve(ctx context.Context, track models.Track) (*Match, erro
 	if s.listenbrainz != nil {
 		match, err := s.resolveViaListenBrainz(ctx, in, track)
 		if err != nil {
-			s.logger.Printf("ListenBrainz lookup failed for %q, falling back: %v", track.Name, err)
+			s.logger.Warn("listenbrainz lookup failed", append(trackAttrs(track), slog.Any("err", err))...)
 		}
 		lbMatch = match
 	}
@@ -684,8 +750,9 @@ func (s *Service) Resolve(ctx context.Context, track models.Track) (*Match, erro
 			return lbMatch, nil
 		}
 		doubt = reason
-		s.logger.Printf("second opinion on %q: ListenBrainz's %q disagrees on %s, searching",
-			track.Name, lbMatch.Recording.Title, reason)
+		attrs := trackAttrs(track)
+		attrs = append(attrs, recordingAttrs(lbMatch.Recording, lbMatch.Release)...)
+		s.logger.Info("doubting listenbrainz match", append(attrs, slog.String("disagrees_on", reason))...)
 	}
 
 	var allCandidates []candidate
@@ -703,7 +770,7 @@ func (s *Service) Resolve(ctx context.Context, track models.Track) (*Match, erro
 		recordings, err := s.search(ctx, tier)
 		if err != nil {
 			lastErr = err
-			s.logger.Printf("search tier %q failed: %v", tier.query, err)
+			s.logger.Warn("search tier failed", "query", tier.query, "err", err)
 			continue
 		}
 		searched = true
@@ -751,8 +818,10 @@ func (s *Service) Resolve(ctx context.Context, track models.Track) (*Match, erro
 		return lbMatch, nil
 	}
 	if lbMatch != nil {
-		s.logger.Printf("dropping doubted ListenBrainz match %q for %q: it disagrees on %s and no search tier could be reached",
-			lbMatch.Recording.Title, track.Name, doubt)
+		attrs := trackAttrs(track)
+		attrs = append(attrs, recordingAttrs(lbMatch.Recording, lbMatch.Release)...)
+		s.logger.Info("dropped doubted listenbrainz match",
+			append(attrs, slog.String("disagrees_on", doubt))...)
 	}
 	if lastErr != nil && len(allCandidates) == 0 {
 		return nil, lastErr
@@ -765,17 +834,18 @@ func (s *Service) Resolve(ctx context.Context, track models.Track) (*Match, erro
 // was built from. Matching fails quietly -- a play just ends up carrying the
 // wrong MBID -- so every accepted match leaves a trail that can be read back.
 func (s *Service) logMatch(track models.Track, match *Match) {
-	release := "<none>"
-	if match.Release != nil {
-		release = match.Release.Title
-	}
-	var reasons []string
+	var reasons signals
 	if len(match.Candidates) > 0 {
 		reasons = match.Candidates[0].reasons
 	}
-	s.logger.Printf("matched %q by %q -> %q / %q (%.2f via %s) [%s]",
-		track.Name, primaryArtist(track), match.Recording.Title, release,
-		match.Score, match.Source, strings.Join(reasons, " "))
+
+	attrs := trackAttrs(track)
+	attrs = append(attrs, recordingAttrs(match.Recording, match.Release)...)
+	attrs = append(attrs,
+		slog.Float64("score", logRound(match.Score)),
+		slog.Float64("threshold", minConfidence),
+		slog.String("source", match.Source))
+	s.logger.Info("matched", append(attrs, reasons.attrs()...)...)
 }
 
 // logNoMatch records a rejection along with the candidate that came closest, so
@@ -783,13 +853,18 @@ func (s *Service) logMatch(track models.Track, match *Match) {
 // simply holding nothing.
 func (s *Service) logNoMatch(track models.Track, candidates []candidate) {
 	if len(candidates) == 0 {
-		s.logger.Printf("no match for %q by %q: no candidates returned", track.Name, primaryArtist(track))
+		s.logger.Info("unmatched", append(trackAttrs(track), slog.String("reason", "no_candidates"))...)
 		return
 	}
+
 	best := candidates[0]
-	s.logger.Printf("no confident match for %q by %q: best was %q at %.2f < %.2f [%s]",
-		track.Name, primaryArtist(track), best.recording.Title, best.score, minConfidence,
-		strings.Join(best.reasons, " "))
+	attrs := trackAttrs(track)
+	attrs = append(attrs, recordingAttrs(best.recording, best.release)...)
+	attrs = append(attrs,
+		slog.Float64("score", logRound(best.score)),
+		slog.Float64("threshold", minConfidence),
+		slog.String("reason", "below_threshold"))
+	s.logger.Info("unmatched", append(attrs, best.reasons.attrs()...)...)
 }
 
 // resolveRelease picks the album to attribute a play to. When the release list
@@ -813,7 +888,8 @@ func (s *Service) pickRelease(ctx context.Context, in matchInput, rec Recording,
 
 	full, err := s.LookupRecording(ctx, rec.ID)
 	if err != nil {
-		s.logger.Printf("release lookup for %s failed, keeping search result: %v", rec.ID, err)
+		s.logger.Warn("release lookup failed, keeping search result",
+			"recording_mbid", rec.ID, "recording", rec.Title, "err", err)
 		return release
 	}
 

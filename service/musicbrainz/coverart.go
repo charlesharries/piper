@@ -2,11 +2,10 @@ package musicbrainz
 
 import (
 	"context"
-	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
-	"strings"
 	"time"
 )
 
@@ -61,7 +60,7 @@ func (s *Service) hasCoverArt(ctx context.Context, releaseMBID string) bool {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		s.logger.Printf("cover art probe for release %s failed: %v", releaseMBID, err)
+		s.logger.Warn("cover art probe failed", "release_mbid", releaseMBID, "err", err)
 		return false
 	}
 	resp.Body.Close()
@@ -115,7 +114,7 @@ func (s *Service) releaseGroupPressings(ctx context.Context, releaseGroupID stri
 
 	var result browseReleasesResponse
 	if err := s.doRequest(ctx, buildBrowseReleasesEndpoint(releaseGroupID), &result); err != nil {
-		s.logger.Printf("pressing lookup for release group %s failed: %v", releaseGroupID, err)
+		s.logger.Warn("pressing lookup failed", "release_group_mbid", releaseGroupID, "err", err)
 		return pressings{}
 	}
 
@@ -165,27 +164,25 @@ func (s *Service) preferReleaseWithArt(ctx context.Context, in matchInput, rec R
 		return release
 	}
 	if len(found.artOwners) == 0 {
-		s.logger.Printf("no cover art for release %s (%s) or any of the %s in its release group",
-			release.ID, release.Title, pressingCount(len(found.releases)))
+		s.logger.Info("no cover art in release group",
+			"release_mbid", release.ID, "release", release.Title,
+			"release_group_mbid", release.ReleaseGroup.ID, "pressings", len(found.releases))
 		return release
 	}
 
 	better, _, reasons := bestRelease(in, found.releases, rec.Title, found.artOwners)
 	if better == nil || !found.artOwners[better.ID] {
-		s.logger.Printf("keeping release %s (%s) without cover art: none of the %s that have some scored better",
-			release.ID, release.Title, pressingCount(len(found.artOwners)))
+		s.logger.Info("kept release without cover art",
+			"release_mbid", release.ID, "release", release.Title,
+			"art_pressings", len(found.artOwners))
 		return release
 	}
 
-	s.logger.Printf("swapped release %s (%s) for %s, which has cover art [%s]",
-		release.ID, release.Title, better.ID, strings.Join(reasons, " "))
-	return better
-}
-
-// pressingCount renders a count of pressings for a log line.
-func pressingCount(n int) string {
-	if n == 1 {
-		return "1 pressing"
+	attrs := []any{
+		slog.String("release_mbid", release.ID),
+		slog.String("to_release_mbid", better.ID),
+		slog.String("release", better.Title),
 	}
-	return fmt.Sprintf("%d pressings", n)
+	s.logger.Info("swapped release for cover art", append(attrs, reasons.attrs()...)...)
+	return better
 }
