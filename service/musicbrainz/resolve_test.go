@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"testing"
@@ -85,11 +86,12 @@ func (rt *routedTransport) artProbes() []string { return rt.matching("coverartar
 func newTestService(t *testing.T, routes ...route) (*Service, *routedTransport) {
 	t.Helper()
 	transport := &routedTransport{routes: routes}
-	svc := NewMusicBrainzService(nil, WithHTTPClient(&http.Client{Transport: transport}))
+	svc := NewMusicBrainzService(nil,
+		WithHTTPClient(&http.Client{Transport: transport}),
+		WithLogger(slog.New(slog.DiscardHandler)))
 	// The real limiter serialises requests at 1/sec, which would make these
 	// tests needlessly slow.
 	svc.limiter = rate.NewLimiter(rate.Inf, 1)
-	svc.logger.SetOutput(io.Discard)
 	return svc, transport
 }
 
