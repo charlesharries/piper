@@ -2,135 +2,242 @@ package musicbrainz
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"log/slog"
+	"net/http"
 	"strings"
 	"testing"
+
+	"golang.org/x/time/rate"
 )
 
-// loggedService returns a service whose logs are captured, so a test can read
-// back what a lookup recorded about itself.
-func loggedService(t *testing.T) (*Service, *bytes.Buffer) {
+// loggedService is newTestService with the logs kept rather than discarded.
+func loggedService(t *testing.T, routes ...route) (*Service, *bytes.Buffer) {
 	t.Helper()
 	var buf bytes.Buffer
-	handler := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})
-	return NewMusicBrainzService(nil, WithLogger(slog.New(handler))), &buf
+	svc := NewMusicBrainzService(nil,
+		WithHTTPClient(&http.Client{Transport: &routedTransport{routes: routes}}),
+		WithLogger(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))))
+	svc.limiter = rate.NewLimiter(rate.Inf, 1)
+	return svc, &buf
 }
 
-// matched builds a resolved play covering every identifier a log line should
-// carry: recording, release, release group and artist.
-func matched() (rec Recording, release *Release) {
-	rec = Recording{
-		ID:    "e97f805a-ab48-4c52-855e-07049142113d",
-		Title: "Dreams",
-		ArtistCredit: []ArtistCredit{{
-			Name:   "Fleetwood Mac",
-			Artist: Artist{ID: "bd13909f-1c29-4c27-a874-d4aaf27c5b1a", Name: "Fleetwood Mac"},
-		}},
-	}
-	release = &Release{
-		ID:           "0b7b1a3f-cf29-4f1a-b0a7-2e2b0a3b21f1",
-		Title:        "Rumours",
-		ReleaseGroup: &ReleaseGroup{ID: "0d0e9e5b-6b0e-4a44-b3d5-8b3a7d0f0f5f", Title: "Rumours"},
-	}
-	return rec, release
-}
+// decodeEvent asserts that exactly one hydration event was written and returns
+// it. One play, one line, is the point of the shape, so every test checks it.
+func decodeEvent(t *testing.T, buf *bytes.Buffer) map[string]any {
+	t.Helper()
 
-func TestLogMatchRecordsMBIDs(t *testing.T) {
-	svc, logs := loggedService(t)
-	rec, release := matched()
-
-	svc.logMatch(track("Dreams", "Fleetwood Mac", "Rumours", ""), &Match{
-		Recording: rec,
-		Release:   release,
-		Score:     0.94,
-		Source:    "musicbrainz",
-		Candidates: []candidate{{
-			recording: rec,
-			release:   release,
-			score:     0.94,
-			reasons:   signals{{"title", 1}, {"artist", 1}, {"conflict", -0.25}},
-		}},
-	})
-
-	got := logs.String()
-	for _, want := range []string{
-		"msg=matched",
-		"service=musicbrainz",
-		"recording_mbid=" + rec.ID,
-		"artist_mbid=" + rec.ArtistCredit[0].Artist.ID,
-		"release_mbid=" + release.ID,
-		"release_group_mbid=" + release.ReleaseGroup.ID,
-		"score=0.94",
-		"threshold=0.62",
-		"source=musicbrainz",
-		"sig_title=1",
-		"sig_conflict=-0.25",
-	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("log missing %q:\n%s", want, got)
+	var events []map[string]any
+	for line := range strings.Lines(strings.TrimSpace(buf.String())) {
+		if line = strings.TrimSpace(line); line == "" {
+			continue
+		}
+		var parsed map[string]any
+		if err := json.Unmarshal([]byte(line), &parsed); err != nil {
+			t.Fatalf("log line is not JSON: %v\n%s", err, line)
+		}
+		if parsed["msg"] == eventName {
+			events = append(events, parsed)
 		}
 	}
+
+	if len(events) != 1 {
+		t.Fatalf("wrote %d hydration events, want exactly 1:\n%s", len(events), buf)
+	}
+	return events[0]
 }
 
-// A rejection is the line that gets read when a play went unmatched, so it has
-// to name the recording that came closest rather than only its title.
-func TestLogNoMatchRecordsNearMiss(t *testing.T) {
-	svc, logs := loggedService(t)
-	rec, release := matched()
-
-	svc.logNoMatch(track("Dreams", "Fleetwood Mac", "Rumours", ""), []candidate{{
-		recording: rec,
-		release:   release,
-		score:     0.41,
-		reasons:   signals{{"title", 1}, {"uncorroborated", -0.4}},
-	}})
-
-	got := logs.String()
-	for _, want := range []string{
-		"msg=unmatched",
-		"reason=below_threshold",
-		"recording_mbid=" + rec.ID,
-		"release_mbid=" + release.ID,
-		"score=0.41",
-		"sig_uncorroborated=-0.4",
-	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("log missing %q:\n%s", want, got)
-		}
+func group(t *testing.T, event map[string]any, name string) map[string]any {
+	t.Helper()
+	nested, ok := event[name].(map[string]any)
+	if !ok {
+		t.Fatalf("event has no %q group:\n%v", name, event)
 	}
+	return nested
 }
 
-func TestLogNoMatchWithoutCandidates(t *testing.T) {
-	svc, logs := loggedService(t)
-
-	svc.logNoMatch(track("Nonsense", "Nobody", "", ""), nil)
-
-	got := logs.String()
-	if !strings.Contains(got, "msg=unmatched") || !strings.Contains(got, "reason=no_candidates") {
-		t.Errorf("want an unmatched line naming no_candidates, got:\n%s", got)
+// want asserts a field's value, reached by walking nested group names.
+func want(t *testing.T, event map[string]any, expected any, path ...string) {
+	t.Helper()
+	for _, name := range path[:len(path)-1] {
+		event = group(t, event, name)
 	}
-	if strings.Contains(got, "recording_mbid") {
-		t.Errorf("nothing was matched, so no recording should be named:\n%s", got)
+	field := path[len(path)-1]
+	if got := event[field]; got != expected {
+		t.Errorf("%s = %v, want %v", strings.Join(path, "."), got, expected)
 	}
 }
 
-// A partially resolved match still has to log: a rejected ListenBrainz answer
-// has no release yet, and a play with no artist credit must not panic the way
-// an index would.
-func TestRecordingAttrsTolerateMissingData(t *testing.T) {
-	attrs := recordingAttrs(Recording{ID: "abc", Title: "Dreams"}, nil)
+func TestHydrationEventRecordsAMatch(t *testing.T) {
+	rec := recording("Dreams", "Fleetwood Mac", 257800,
+		release("Rumours", "Rumours", "1977-02-04", "US"))
 
-	var buf bytes.Buffer
-	slog.New(slog.NewTextHandler(&buf, nil)).Info("partial", attrs...)
+	svc, logs := loggedService(t, route{match: "/ws/2/recording?", body: searchBody(t, rec)})
 
-	got := buf.String()
-	if !strings.Contains(got, "recording_mbid=abc") {
-		t.Errorf("want the recording MBID, got:\n%s", got)
+	play := dreams()
+	play.ISRC = "USWB10002225"
+	if _, err := svc.Resolve(context.Background(), play); err != nil {
+		t.Fatalf("Resolve() error = %v", err)
 	}
-	for _, unwanted := range []string{"release_mbid", "release_group_mbid", "artist_mbid"} {
-		if strings.Contains(got, unwanted) {
-			t.Errorf("nothing supplied %s, so it should be absent:\n%s", unwanted, got)
-		}
+
+	event := decodeEvent(t, logs)
+	want(t, event, outcomeMatched, "outcome")
+	want(t, event, "musicbrainz", "source")
+	want(t, event, "musicbrainz", "service")
+
+	want(t, event, "Dreams", "in", "track")
+	want(t, event, "Fleetwood Mac", "in", "artist")
+	want(t, event, "USWB10002225", "in", "isrc")
+	want(t, event, float64(257800), "in", "duration_ms")
+
+	// The MBIDs are what a wrong match has to be traced back to.
+	want(t, event, rec.ID, "out", "recording_mbid")
+	want(t, event, rec.ArtistCredit[0].Artist.ID, "out", "artist_mbid")
+	want(t, event, rec.Releases[0].ID, "out", "release_mbid")
+	want(t, event, rec.Releases[0].ReleaseGroup.ID, "out", "release_group_mbid")
+
+	want(t, event, minConfidence, "threshold")
+	want(t, event, float64(1), "search", "won_at_tier")
+	if _, ok := event["score"]; !ok {
+		t.Errorf("event carries no score:\n%v", event)
+	}
+	if sig := group(t, event, "sig"); len(sig) == 0 {
+		t.Error("event carries no scoring signals")
+	}
+	if requests, _ := group(t, event, "cost")["mb_requests"].(float64); requests < 1 {
+		t.Errorf("cost recorded %v requests, want at least 1", requests)
+	}
+}
+
+// Which user, and which service reported the play, are the first things to
+// slice by when a run of plays matches badly. Neither is knowable in here.
+func TestHydrationEventCarriesCallerContext(t *testing.T) {
+	rec := recording("Dreams", "Fleetwood Mac", 257800,
+		release("Rumours", "Rumours", "1977-02-04", "US"))
+
+	svc, logs := loggedService(t, route{match: "/ws/2/recording?", body: searchBody(t, rec)})
+
+	ctx := WithEventContext(context.Background(),
+		slog.Int64("user_id", 7), slog.String("play_source", "spotify"))
+	if _, err := HydrateTrackContext(ctx, svc, dreams()); err != nil {
+		t.Fatalf("HydrateTrackContext() error = %v", err)
+	}
+
+	event := decodeEvent(t, logs)
+	want(t, event, float64(7), "user_id")
+	want(t, event, "spotify", "play_source")
+}
+
+// A miss has to name the candidate that came closest and why it fell short, so
+// a threshold set too high is visible rather than looking like MusicBrainz
+// simply holding nothing.
+func TestHydrationEventRecordsANearMiss(t *testing.T) {
+	wrong := recording("Bohemian Rhapsody", "Queen", 355106)
+
+	svc, logs := loggedService(t, route{match: "/ws/2/recording?", body: searchBody(t, wrong)})
+
+	if _, err := svc.Resolve(context.Background(), dreams()); err == nil {
+		t.Fatal("Resolve() error = nil, want ErrNoConfidentMatch")
+	}
+
+	event := decodeEvent(t, logs)
+	want(t, event, outcomeUnmatched, "outcome")
+	want(t, event, wrong.ID, "out", "recording_mbid")
+	if score, _ := event["score"].(float64); score >= minConfidence {
+		t.Errorf("score = %v, want something below the threshold", event["score"])
+	}
+	if sig := group(t, event, "sig"); len(sig) == 0 {
+		t.Error("a near miss with no signal breakdown cannot be diagnosed")
+	}
+}
+
+// ListenBrainz's answer can be accepted, doubted then overruled, or dropped
+// unverified. Which of those happened explains a play that went one way today
+// and another way yesterday, and it stays on the one line.
+func TestHydrationEventRecordsListenBrainzPath(t *testing.T) {
+	photoAlbum := release("The Photo Album", "The Photo Album", "2001-10-09", "US")
+	doubted := recording("Stability", "Death Cab for Cutie", 740864, photoAlbum)
+	doubted.ID = "photo-album-mbid"
+
+	stabilityEP := release("The Stability EP", "The Stability EP", "2002-03-05", "US")
+	better := recording("Stability / Coney Island (alternate version)", "Death Cab for Cutie", 741600, stabilityEP)
+	better.ID = "stability-ep-mbid"
+
+	agreed := recording("Stability", "Death Cab for Cutie", 741000, stabilityEP)
+	agreed.ID = "good-mbid"
+
+	tests := []struct {
+		name        string
+		routes      []route
+		lbMBID      string
+		wantOutcome string
+		wantDoubt   string
+	}{
+		{
+			name:        "accepted when nothing about it looks doubtful",
+			routes:      []route{{match: "recording/good-mbid", body: mustJSON(t, agreed)}},
+			lbMBID:      "good-mbid",
+			wantOutcome: lbAccepted,
+		},
+		{
+			name: "doubted on the album, then overruled by search",
+			routes: []route{
+				{match: "recording/photo-album-mbid", body: mustJSON(t, doubted)},
+				{match: "/ws/2/recording?", body: searchBody(t, better)},
+			},
+			lbMBID:      "photo-album-mbid",
+			wantOutcome: lbDoubted,
+			wantDoubt:   "album",
+		},
+		{
+			name: "dropped when no tier could second it",
+			routes: []route{
+				{match: "recording/photo-album-mbid", body: mustJSON(t, doubted)},
+				{match: "/ws/2/recording?", body: `{"count":0,"recordings":[]}`,
+					status: http.StatusInternalServerError, sticky: true},
+			},
+			lbMBID:      "photo-album-mbid",
+			wantOutcome: lbDropped,
+			wantDoubt:   "album",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc, logs := loggedService(t, tt.routes...)
+			svc.listenbrainz = stubListenBrainz{result: &ListenBrainzResult{RecordingMBID: tt.lbMBID}}
+
+			svc.Resolve(context.Background(), stability())
+
+			event := decodeEvent(t, logs)
+			want(t, event, tt.wantOutcome, "lb", "outcome")
+			want(t, event, tt.lbMBID, "lb", "recording_mbid")
+			if tt.wantDoubt != "" {
+				want(t, event, tt.wantDoubt, "lb", "disagrees_on")
+			}
+		})
+	}
+}
+
+// The event belongs to a hydration. Paths reached outside one -- the search API
+// handler calling SearchMusicBrainz -- record nothing.
+func TestNoEventOutsideAHydration(t *testing.T) {
+	rec := recording("Dreams", "Fleetwood Mac", 257800)
+
+	svc, logs := loggedService(t,
+		route{match: "/ws/2/recording?", body: searchBody(t, rec)},
+		route{match: "/ws/2/recording/", body: mustJSON(t, rec)})
+
+	if _, err := svc.SearchMusicBrainz(context.Background(), SearchParams{Track: "Dreams"}); err != nil {
+		t.Fatalf("SearchMusicBrainz() error = %v", err)
+	}
+	if _, err := svc.LookupRecording(context.Background(), rec.ID); err != nil {
+		t.Fatalf("LookupRecording() error = %v", err)
+	}
+
+	if strings.Contains(logs.String(), eventName) {
+		t.Errorf("wrote a hydration event outside a hydration:\n%s", logs)
 	}
 }
 

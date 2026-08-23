@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -382,8 +383,9 @@ func (s *Service) FetchRecentPlayedTracks(ctx context.Context, userToken string,
 	return parsed.Data, nil
 }
 
-// toTrack converts AppleRecentTrack to internal models.Track
-func (s *Service) toTrack(t AppleRecentTrack) *models.Track {
+// toTrack converts AppleRecentTrack to internal models.Track. It takes the poll
+// cycle's context and user because it hydrates against MusicBrainz.
+func (s *Service) toTrack(ctx context.Context, userID int64, t AppleRecentTrack) *models.Track {
 	var duration int64
 	if t.Attributes.DurationInMillis != nil {
 		duration = *t.Attributes.DurationInMillis
@@ -417,7 +419,9 @@ func (s *Service) toTrack(t AppleRecentTrack) *models.Track {
 	}
 
 	if s.mbService != nil {
-		hydrated, err := musicbrainz.HydrateTrack(s.mbService, *track)
+		hydrateCtx := musicbrainz.WithEventContext(ctx,
+			slog.Int64("user_id", userID), slog.String("play_source", "applemusic"))
+		hydrated, err := musicbrainz.HydrateTrackContext(hydrateCtx, s.mbService, *track)
 		if err == nil && hydrated != nil {
 			track = hydrated
 		}
@@ -590,7 +594,7 @@ func (s *Service) ProcessUser(ctx context.Context, user *models.User) error {
 	}
 
 	// Convert to internal track format
-	track := s.toTrack(*currentAppleTrack)
+	track := s.toTrack(ctx, user.ID, *currentAppleTrack)
 	if track == nil || strings.TrimSpace(track.Name) == "" || len(track.Artist) == 0 {
 		s.logger.Printf("invalid track data for user %d", user.ID)
 		return nil

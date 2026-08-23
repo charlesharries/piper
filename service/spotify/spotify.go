@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -796,7 +797,9 @@ func (s *Service) stampTrack(ctx context.Context, userID int64, track *models.Tr
 
 	trackToSubmit := track
 	if s.mb != nil {
-		hydratedTrack, err := musicbrainz.HydrateTrack(s.mb, *track)
+		hydrateCtx := musicbrainz.WithEventContext(ctx,
+			slog.Int64("user_id", userID), slog.String("play_source", "spotify"))
+		hydratedTrack, err := musicbrainz.HydrateTrackContext(hydrateCtx, s.mb, *track)
 		if err != nil {
 			s.logger.Printf("User %d: Error hydrating track '%s' with MusicBrainz: %v", userID, track.Name, err)
 		} else {

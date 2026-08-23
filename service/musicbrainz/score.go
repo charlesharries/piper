@@ -444,8 +444,8 @@ type signal struct {
 
 // signals is a score's full breakdown, in the order the components were
 // applied. It renders as "title=1.00 artist=0.93" for the CLI, and expands into
-// sig_* attributes for logs, so a bad match can be queried by the signal that
-// let it through rather than only read by eye.
+// the hydration event's `sig` group, so a bad match can be queried by the
+// signal that let it through rather than only read by eye.
 type signals []signal
 
 func (s signals) String() string {
@@ -456,13 +456,13 @@ func (s signals) String() string {
 	return strings.Join(parts, " ")
 }
 
-// attrs renders the breakdown as slog attributes, prefixed so that a signal
-// named after a field the log line already carries -- title, artist, album --
-// cannot collide with it.
+// attrs renders the breakdown as slog attributes for the event's `sig` group.
+// The group is what keeps a signal named after a field the event already
+// carries -- title, artist, album -- from colliding with it.
 func (s signals) attrs() []any {
 	attrs := make([]any, len(s))
 	for i, sig := range s {
-		attrs[i] = slog.Float64("sig_"+sig.name, logRound(sig.value))
+		attrs[i] = slog.Float64(sig.name, logRound(sig.value))
 	}
 	return attrs
 }
