@@ -114,6 +114,20 @@ Each 307-redirects to the image, or 404s when that release has no cover. `record
 
 Artwork is uploaded per pressing and most pressings have none, so which release piper picks decides whether that URL works. Release selection therefore scores artwork availability alongside the metadata signals (see [`service/musicbrainz/coverart.go`](./service/musicbrainz/coverart.go)) and prefers a pressing the archive holds a cover for, provided it is an equally good answer for the album. Getting the right album still wins over getting a cover.
 
+#### hydration events
+
+Matching fails quietly — a play just ends up carrying the wrong MBID — so the logs are the only record of what was decided. Hydrating a play writes exactly one JSON line to stderr, `msg: "track_hydrated"`, carrying the play as the service reported it (`in`), what it was attributed to (`out`), the score and its per-signal breakdown (`sig`), what ListenBrainz said and whether it was believed (`lb`), which tier won (`search`), the artwork pass (`art`) and the request count (`cost`). Nothing is logged mid-lookup, so there are no lines to stitch together.
+
+```sh
+go run ./cmd/musicbrainz-cli -batch cmd/musicbrainz-cli/testdata/golden.jsonl 2>events.jsonl
+
+# what is going unmatched, and which signal fell short
+jq 'select(.outcome=="unmatched") | {track: .in.track, score, sig}' events.jsonl
+
+# matches that won by a hair -- the ones most likely to be wrong
+jq 'select(.runner_up_score and .score - .runner_up_score < 0.05)' events.jsonl
+```
+
 #### Lexicon changes
 
 1. Copy the new or changed json schema files to the [lexicon folders](./lexicons)

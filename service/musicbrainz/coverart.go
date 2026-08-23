@@ -2,7 +2,6 @@ package musicbrainz
 
 import (
 	"context"
-	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -60,7 +59,7 @@ func (s *Service) hasCoverArt(ctx context.Context, releaseMBID string) bool {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		s.logger.Warn("cover art probe failed", "release_mbid", releaseMBID, "err", err)
+		eventFrom(ctx).noteErr(err)
 		return false
 	}
 	resp.Body.Close()
@@ -114,7 +113,7 @@ func (s *Service) releaseGroupPressings(ctx context.Context, releaseGroupID stri
 
 	var result browseReleasesResponse
 	if err := s.doRequest(ctx, buildBrowseReleasesEndpoint(releaseGroupID), &result); err != nil {
-		s.logger.Warn("pressing lookup failed", "release_group_mbid", releaseGroupID, "err", err)
+		eventFrom(ctx).noteErr(err)
 		return pressings{}
 	}
 
@@ -150,9 +149,12 @@ func (s *Service) preferReleaseWithArt(ctx context.Context, in matchInput, rec R
 		return release
 	}
 
+	ev := eventFrom(ctx)
+
 	// Fast path: the release we already picked resolves to a cover, so a
 	// consumer of the play record can reach artwork and there is nothing to fix.
 	if s.hasCoverArt(ctx, release.ID) {
+		ev.artOutcome = artHadArt
 		return release
 	}
 
@@ -161,28 +163,20 @@ func (s *Service) preferReleaseWithArt(ctx context.Context, in matchInput, rec R
 		return release
 	}
 	if found.artOwners[release.ID] {
+		ev.artOutcome = artHadArt
 		return release
 	}
 	if len(found.artOwners) == 0 {
-		s.logger.Info("no cover art in release group",
-			"release_mbid", release.ID, "release", release.Title,
-			"release_group_mbid", release.ReleaseGroup.ID, "pressings", len(found.releases))
+		ev.artOutcome = artNoneInGroup
 		return release
 	}
 
-	better, _, reasons := bestRelease(in, found.releases, rec.Title, found.artOwners)
+	better, _, _ := bestRelease(in, found.releases, rec.Title, found.artOwners)
 	if better == nil || !found.artOwners[better.ID] {
-		s.logger.Info("kept release without cover art",
-			"release_mbid", release.ID, "release", release.Title,
-			"art_pressings", len(found.artOwners))
+		ev.artOutcome = artKept
 		return release
 	}
 
-	attrs := []any{
-		slog.String("release_mbid", release.ID),
-		slog.String("to_release_mbid", better.ID),
-		slog.String("release", better.Title),
-	}
-	s.logger.Info("swapped release for cover art", append(attrs, reasons.attrs()...)...)
+	ev.artOutcome, ev.artFrom = artSwapped, release.ID
 	return better
 }

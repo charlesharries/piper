@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
@@ -577,7 +578,9 @@ func hydrateAndSubmitListens(database *db.DB, atprotoService *atprotoauth.AuthSe
 		track := saved.track
 
 		if mbService != nil && track.RecordingMBID == nil {
-			hydratedTrack, err := musicbrainz.HydrateTrack(mbService, track)
+			hydrateCtx := musicbrainz.WithEventContext(ctx,
+				slog.Int64("user_id", userID), slog.String("play_source", "import"))
+			hydratedTrack, err := musicbrainz.HydrateTrackContext(hydrateCtx, mbService, track)
 			if err != nil {
 				log.Printf("apiSubmitListensHandler: Could not hydrate track with MusicBrainz for user %d: %v (continuing with original data)", userID, err)
 			} else if hydratedTrack != nil {
