@@ -84,9 +84,10 @@ func (mc *MetadataCleaner) DropForeignChars(text string) string {
 
 	cleaned := strings.TrimSpace(b.String())
 
-	// If the cleaned version has less than half of the letters of the
-	// original, and there are foreign characters present, just return
-	// the original: chances are we've got a foreign title or artist.
+	// Only returned the cleaned version if it retains more than half
+	// of the letters of the original text; otherwise we probably
+	// just cleaned a bunch of foreign chars and what's left isn't
+	// useful.
 	if hasForeign && cleaned != "" && keptLetters*2 >= totalLetters {
 		return cleaned
 	}

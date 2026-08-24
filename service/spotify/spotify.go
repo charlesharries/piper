@@ -1,7 +1,6 @@
 package spotify
 
 import (
-	"cmp"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -672,13 +671,7 @@ func (s *Service) computeStateUpdate(userID int64, resp *SpotifyTrackResponse) s
 		}
 		state = s.userPlayStates[userID]
 		action.publishNowPlaying = true
-		// The ISRC is logged because it is the only signal that reliably matches
-		// a play whose title or artist MusicBrainz holds in a different script
-		// or language, where no amount of string comparison can bridge the two.
-		// When one of those fails to match, this says whether Spotify gave us an
-		// ISRC to match on at all.
-		s.logger.Printf("Track changed for user %d: %s by %s (isrc: %s)",
-			userID, track.Name, getFirstArtist(track), cmp.Or(track.ISRC, "<none>"))
+		s.logger.Printf("Track changed for user %d: %s by %s", userID, track.Name, getFirstArtist(track))
 	} else {
 		// Same song continuing
 		state.track = track
@@ -799,7 +792,7 @@ func (s *Service) stampTrack(ctx context.Context, userID int64, track *models.Tr
 	if s.mb != nil {
 		hydrateCtx := musicbrainz.WithEventContext(ctx,
 			slog.Int64("user_id", userID), slog.String("play_source", "spotify"))
-		hydratedTrack, err := musicbrainz.HydrateTrackContext(hydrateCtx, s.mb, *track)
+		hydratedTrack, err := s.mb.HydrateTrack(hydrateCtx, *track)
 		if err != nil {
 			s.logger.Printf("User %d: Error hydrating track '%s' with MusicBrainz: %v", userID, track.Name, err)
 		} else {

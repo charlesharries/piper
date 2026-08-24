@@ -421,7 +421,7 @@ func (s *Service) toTrack(ctx context.Context, userID int64, t AppleRecentTrack)
 	if s.mbService != nil {
 		hydrateCtx := musicbrainz.WithEventContext(ctx,
 			slog.Int64("user_id", userID), slog.String("play_source", "applemusic"))
-		hydrated, err := musicbrainz.HydrateTrackContext(hydrateCtx, s.mbService, *track)
+		hydrated, err := s.mbService.HydrateTrack(hydrateCtx, *track)
 		if err == nil && hydrated != nil {
 			track = hydrated
 		}

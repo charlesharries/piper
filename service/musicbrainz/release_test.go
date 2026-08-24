@@ -18,12 +18,12 @@ func TestBestReleasePrefersTheReportedAlbum(t *testing.T) {
 		release("25 Years: The Chain", "25 Years: The Chain", "1992-11-24", "GB", "Compilation"),
 	}
 
-	got, _, reasons := bestRelease(in, releases, "Dreams", nil)
+	got, score := bestRelease(in, releases, "Dreams", nil)
 	if got == nil {
 		t.Fatal("expected a release")
 	}
 	if got.Title != "Rumours" {
-		t.Errorf("chose %q (%v), want %q", got.Title, reasons, "Rumours")
+		t.Errorf("chose %q (%.3f), want %q", got.Title, score, "Rumours")
 	}
 }
 
@@ -36,9 +36,9 @@ func TestBestReleaseMatchesThroughEditionSuffix(t *testing.T) {
 		release("Rumours", "Rumours", "1977-02-04", "US"),
 	}
 
-	got, _, reasons := bestRelease(in, releases, "Dreams", nil)
+	got, score := bestRelease(in, releases, "Dreams", nil)
 	if got == nil || got.Title != "Rumours" {
-		t.Fatalf("chose %v (%v), want Rumours", got, reasons)
+		t.Fatalf("chose %v (%.3f), want Rumours", got, score)
 	}
 }
 
@@ -52,9 +52,9 @@ func TestBestReleaseMatchesOnReleaseGroupTitle(t *testing.T) {
 		release("Power Corruption and Lies", "Power, Corruption & Lies", "1983-05-02", "GB"),
 	}
 
-	got, _, reasons := bestRelease(in, releases, "Blue Monday", nil)
+	got, score := bestRelease(in, releases, "Blue Monday", nil)
 	if got == nil || got.Title != "Power Corruption and Lies" {
-		t.Fatalf("chose %v (%v), want the release group match", got, reasons)
+		t.Fatalf("chose %v (%.3f), want the release group match", got, score)
 	}
 }
 
@@ -69,9 +69,9 @@ func TestBestReleaseAllowsCompilationWhenItIsTheAlbum(t *testing.T) {
 		release("Greatest Hits", "Greatest Hits", "1981-10-26", "GB", "Compilation"),
 	}
 
-	got, _, reasons := bestRelease(in, releases, "Bohemian Rhapsody", nil)
+	got, score := bestRelease(in, releases, "Bohemian Rhapsody", nil)
 	if got == nil || got.Title != "Greatest Hits" {
-		t.Fatalf("chose %v (%v), want Greatest Hits", got, reasons)
+		t.Fatalf("chose %v (%.3f), want Greatest Hits", got, score)
 	}
 }
 
@@ -85,9 +85,9 @@ func TestBestReleaseAllowsSoundtrackWhenItIsTheAlbum(t *testing.T) {
 		release("Some Other Record", "Some Other Record", "1970-01-01", "US"),
 	}
 
-	got, _, reasons := bestRelease(in, releases, "Speak to Me", nil)
+	got, score := bestRelease(in, releases, "Speak to Me", nil)
 	if got == nil || got.Title != "Guardians of the Galaxy" {
-		t.Fatalf("chose %v (%v), want the soundtrack", got, reasons)
+		t.Fatalf("chose %v (%.3f), want the soundtrack", got, score)
 	}
 }
 
@@ -102,9 +102,9 @@ func TestBestReleaseWithoutAlbumHint(t *testing.T) {
 		release("A Night at the Opera", "A Night at the Opera", "1975-11-21", "GB"),
 	}
 
-	got, _, reasons := bestRelease(in, releases, "Bohemian Rhapsody", nil)
+	got, score := bestRelease(in, releases, "Bohemian Rhapsody", nil)
 	if got == nil || got.Title != "A Night at the Opera" {
-		t.Fatalf("chose %v (%v), want A Night at the Opera", got, reasons)
+		t.Fatalf("chose %v (%.3f), want A Night at the Opera", got, score)
 	}
 }
 
@@ -116,9 +116,9 @@ func TestBestReleasePrefersOfficial(t *testing.T) {
 	bootleg.Status = "Bootleg"
 	official := release("Rumours", "Rumours", "1977-02-04", "US")
 
-	got, _, reasons := bestRelease(in, []Release{bootleg, official}, "Dreams", nil)
+	got, score := bestRelease(in, []Release{bootleg, official}, "Dreams", nil)
 	if got == nil || got.Status != "Official" {
-		t.Fatalf("chose %v (%v), want the official release", got, reasons)
+		t.Fatalf("chose %v (%.3f), want the official release", got, score)
 	}
 }
 
@@ -129,9 +129,9 @@ func TestBestReleasePrefersKnownCoverArt(t *testing.T) {
 	plain := release("Rumours", "Rumours", "1977-02-04", "US")
 	withArt := release("Rumours", "Rumours", "1977-02-04", "GB")
 
-	got, _, reasons := bestRelease(in, []Release{plain, withArt}, "Dreams", map[string]bool{withArt.ID: true})
+	got, score := bestRelease(in, []Release{plain, withArt}, "Dreams", map[string]bool{withArt.ID: true})
 	if got == nil || got.ID != withArt.ID {
-		t.Fatalf("chose %v (%v), want the release with known art", got, reasons)
+		t.Fatalf("chose %v (%.3f), want the release with known art", got, score)
 	}
 }
 
@@ -145,9 +145,9 @@ func TestBestReleaseRejectsUnaskedForEdition(t *testing.T) {
 		release("How the West Was Won", "How the West Was Won", "2003-05-27", "US"),
 	}
 
-	got, _, reasons := bestRelease(in, releases, "Whole Lotta Love", nil)
+	got, score := bestRelease(in, releases, "Whole Lotta Love", nil)
 	if got == nil || got.Title != "How the West Was Won" {
-		t.Fatalf("chose %v (%v), want the plain release", got, reasons)
+		t.Fatalf("chose %v (%.3f), want the plain release", got, score)
 	}
 }
 
@@ -161,9 +161,9 @@ func TestBestReleaseAllowsRequestedEdition(t *testing.T) {
 		release("Rumours", "Rumours", "1977-02-04", "US"),
 	}
 
-	got, _, reasons := bestRelease(in, releases, "Dreams", nil)
+	got, score := bestRelease(in, releases, "Dreams", nil)
 	if got == nil {
-		t.Fatalf("expected a release (%v)", reasons)
+		t.Fatalf("expected a release (%.3f)", score)
 	}
 	if !strings.HasPrefix(got.Title, "Rumours") {
 		t.Errorf("chose %q, want a Rumours pressing", got.Title)
@@ -178,7 +178,7 @@ func TestBestReleaseTieBreaksOnDate(t *testing.T) {
 	original := release("Rumours", "Rumours", "1977-02-04", "US")
 
 	for range 5 {
-		got, _, _ := bestRelease(in, []Release{reissue, original}, "Dreams", nil)
+		got, _ := bestRelease(in, []Release{reissue, original}, "Dreams", nil)
 		if got == nil || got.Date != "1977-02-04" {
 			t.Fatalf("chose %v, want the original issue", got)
 		}
@@ -186,7 +186,7 @@ func TestBestReleaseTieBreaksOnDate(t *testing.T) {
 }
 
 func TestBestReleaseEmpty(t *testing.T) {
-	got, _, _ := bestRelease(newMatchInput(models.Track{}), nil, "Dreams", nil)
+	got, _ := bestRelease(newMatchInput(models.Track{}), nil, "Dreams", nil)
 	if got != nil {
 		t.Errorf("bestRelease() = %v, want nil", got)
 	}
@@ -202,7 +202,7 @@ func TestBestReleaseDoesNotMutateInput(t *testing.T) {
 	}
 	before := []string{releases[0].Title, releases[1].Title}
 
-	if _, _, _ = bestRelease(in, releases, "Dreams", nil); releases[0].Title != before[0] || releases[1].Title != before[1] {
+	if _, _ = bestRelease(in, releases, "Dreams", nil); releases[0].Title != before[0] || releases[1].Title != before[1] {
 		t.Errorf("bestRelease reordered its input: %v", releases)
 	}
 }

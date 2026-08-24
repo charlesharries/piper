@@ -3,6 +3,7 @@ package musicbrainz
 import (
 	"context"
 	"log/slog"
+	"math"
 	"time"
 
 	"github.com/teal-fm/piper/models"
@@ -85,7 +86,7 @@ type event struct {
 
 	tiersRun    int
 	tiersFailed int
-	wonAtTier   int // 1-based; 0 when search did not produce the winner
+	wonAtTier   string // name of the tier that produced the winner, if any
 	artistScope string
 
 	artOutcome string
@@ -119,9 +120,7 @@ func eventFrom(ctx context.Context) *event {
 
 func (e *event) matched(match *Match) {
 	e.outcome, e.match = outcomeMatched, match
-	if len(match.Candidates) > 0 {
-		e.reasons = match.Candidates[0].reasons
-	}
+	e.reasons = match.signals()
 	e.rank(match.Candidates)
 }
 
@@ -237,8 +236,8 @@ func (e *event) searchAttrs() []any {
 		slog.Int("tiers_run", e.tiersRun),
 		slog.Int("tiers_failed", e.tiersFailed),
 	}
-	if e.wonAtTier > 0 {
-		attrs = append(attrs, slog.Int("won_at_tier", e.wonAtTier))
+	if e.wonAtTier != "" {
+		attrs = append(attrs, slog.String("won_at_tier", e.wonAtTier))
 	}
 	if e.artistScope != "" {
 		attrs = append(attrs, slog.String("artist_scope", e.artistScope))
@@ -252,4 +251,46 @@ func (e *event) artAttrs() []any {
 		attrs = append(attrs, slog.String("from_release_mbid", e.artFrom))
 	}
 	return attrs
+}
+
+// recordingAttrs describes what a play was resolved to, for the `out` group.
+// The MBIDs are the point of it: a title says a match looks plausible, an MBID
+// says which of the many recordings and pressings sharing that title was
+// actually attached to the play, which is what a wrong match has to be traced
+// back to.
+func recordingAttrs(rec Recording, release *Release) []any {
+	attrs := []any{
+		slog.String("recording_mbid", rec.ID),
+		slog.String("recording", rec.Title),
+	}
+	if len(rec.ArtistCredit) > 0 {
+		attrs = append(attrs, slog.String("artist_mbid", rec.ArtistCredit[0].Artist.ID))
+	}
+	if release != nil {
+		attrs = append(attrs,
+			slog.String("release_mbid", release.ID),
+			slog.String("release", release.Title))
+		if release.ReleaseGroup != nil {
+			attrs = append(attrs, slog.String("release_group_mbid", release.ReleaseGroup.ID))
+		}
+	}
+	return attrs
+}
+
+// attrs renders a score's breakdown for the `sig` group. The group is what
+// keeps a signal named after a field the event already carries -- title,
+// artist, album -- from colliding with it.
+func (s signals) attrs() []any {
+	attrs := make([]any, len(s))
+	for i, sig := range s {
+		attrs[i] = slog.Float64(sig.name, logRound(sig.value))
+	}
+	return attrs
+}
+
+// logRound trims a score to the precision worth reading. Float64's full
+// seventeen digits are noise in a log line, but rounding coarsely enough to
+// print 0.619 as 0.62 would hide why a candidate fell short of minConfidence.
+func logRound(v float64) float64 {
+	return math.Round(v*1000) / 1000
 }

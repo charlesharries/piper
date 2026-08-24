@@ -70,7 +70,7 @@ func (p *Service) PublishPlayingNow(ctx context.Context, userID int64, track *mo
 
 	hydrateCtx := musicbrainz.WithEventContext(ctx,
 		slog.Int64("user_id", userID), slog.String("play_source", "playingnow"))
-	hydratedTrack, err := musicbrainz.HydrateTrackContext(hydrateCtx, p.mb, *track)
+	hydratedTrack, err := p.mb.HydrateTrack(hydrateCtx, *track)
 	if err != nil {
 		p.logger.Printf("User %d: Error hydrating track '%s' with MusicBrainz: %v", userID, track.Name, err)
 	} else {

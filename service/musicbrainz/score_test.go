@@ -6,90 +6,6 @@ import (
 	"github.com/teal-fm/piper/models"
 )
 
-func TestNormalize(t *testing.T) {
-	tests := []struct {
-		name string
-		in   string
-		want string
-	}{
-		{name: "lowercases", in: "Blue Monday", want: "blue monday"},
-		{name: "strips punctuation", in: "Power, Corruption & Lies", want: "power corruption and lies"},
-		{name: "spells out ampersand", in: "Power Corruption and Lies", want: "power corruption and lies"},
-		{name: "strips diacritics", in: "Beyoncé", want: "beyonce"},
-		{name: "collapses whitespace", in: "  Dreams   ", want: "dreams"},
-		{name: "keeps digits", in: "99 Problems", want: "99 problems"},
-		{name: "punctuation becomes a break", in: "Mr.Brightside", want: "mr brightside"},
-		{name: "empty", in: "", want: ""},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := normalize(tt.in); got != tt.want {
-				t.Errorf("normalize(%q) = %q, want %q", tt.in, got, tt.want)
-			}
-		})
-	}
-}
-
-// The release "Power Corruption and Lies" and the release group
-// "Power, Corruption & Lies" are the same album; normalization is what lets a
-// title from Spotify match either.
-func TestNormalizeMatchesReleaseAndGroupTitles(t *testing.T) {
-	if normalize("Power, Corruption & Lies") != normalize("Power Corruption and Lies") {
-		t.Errorf("expected release and release group titles to normalize alike")
-	}
-}
-
-func TestSimilarity(t *testing.T) {
-	tests := []struct {
-		name    string
-		a, b    string
-		wantMin float64
-		wantMax float64
-	}{
-		{name: "identical", a: "dreams", b: "dreams", wantMin: 1, wantMax: 1},
-		{name: "empty pair", a: "", b: "", wantMin: 0, wantMax: 0},
-		{name: "one empty", a: "dreams", b: "", wantMin: 0, wantMax: 0},
-		{name: "close", a: "rumours", b: "rumors", wantMin: 0.8, wantMax: 0.99},
-		{name: "unrelated", a: "dreams", b: "bohemian rhapsody", wantMin: 0, wantMax: 0.3},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := similarity(tt.a, tt.b)
-			if got < tt.wantMin || got > tt.wantMax {
-				t.Errorf("similarity(%q, %q) = %v, want within [%v, %v]", tt.a, tt.b, got, tt.wantMin, tt.wantMax)
-			}
-		})
-	}
-}
-
-func TestSplitQualifier(t *testing.T) {
-	tests := []struct {
-		name          string
-		in            string
-		wantBase      string
-		wantQualifier string
-	}{
-		{name: "parenthesised", in: "Dreams (outtake)", wantBase: "dreams", wantQualifier: "outtake"},
-		{name: "bracketed", in: "Dreams [Live]", wantBase: "dreams", wantQualifier: "live"},
-		{name: "dash suffix", in: "Dreams - 2004 Remaster", wantBase: "dreams", wantQualifier: "2004 remaster"},
-		{name: "no qualifier", in: "Dreams", wantBase: "dreams", wantQualifier: ""},
-		{name: "hyphenated title survives", in: "Jack-in-the-Box", wantBase: "jack in the box", wantQualifier: ""},
-		{name: "edition suffix", in: "Rumours (Super Deluxe)", wantBase: "rumours", wantQualifier: "super deluxe"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			base, qualifier := splitQualifier(tt.in)
-			if base != tt.wantBase || qualifier != tt.wantQualifier {
-				t.Errorf("splitQualifier(%q) = (%q, %q), want (%q, %q)",
-					tt.in, base, qualifier, tt.wantBase, tt.wantQualifier)
-			}
-		})
-	}
-}
-
 func TestDurationScore(t *testing.T) {
 	tests := []struct {
 		name string
@@ -430,70 +346,61 @@ func TestArtistGoesBy(t *testing.T) {
 	}
 }
 
-func TestIsVariantQualifier(t *testing.T) {
-	tests := []struct {
-		qualifier string
-		want      bool
-	}{
-		{qualifier: "outtake", want: true},
-		{qualifier: "live", want: true},
-		{qualifier: "2004 remaster", want: true},
-		{qualifier: "radio edit", want: true},
-		{qualifier: "feat kanye west", want: false},
-		{qualifier: "", want: false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.qualifier, func(t *testing.T) {
-			if got := isVariantQualifier(tt.qualifier); got != tt.want {
-				t.Errorf("isVariantQualifier(%q) = %v, want %v", tt.qualifier, got, tt.want)
-			}
-		})
-	}
-}
-
-// MusicBrainz catalogues a two-song track as "A / B", while services report only
-// the song the listener knows. Scoring the whole string sent Death Cab's
-// "Stability" to The Photo Album instead of the EP it was played from.
-func TestTitleScoreMatchesOneSongOfAMedley(t *testing.T) {
+// Scoring the recording title alone sent Death Cab's "Stability" to The Photo
+// Album instead of the EP it was played from, which lists it under that name.
+func TestTitleScoreMatchesTheNameItsReleaseListsItUnder(t *testing.T) {
 	in := newMatchInput(models.Track{Name: "Stability", Album: "The Stability EP"})
 
-	score, variant := in.titleScore("Stability / Coney Island (alternate version)")
+	rec := recording("Stability / Coney Island (alternate version)", "Death Cab for Cutie", 741600,
+		listedAs(release("The Stability EP", "The Stability E.P.", "2002-02-19", "XW"), "Stability"))
+
+	score, variant := in.titleScore(rec)
 	if score < 0.99 {
-		t.Errorf("title score = %.2f, want a full match on the first song", score)
+		t.Errorf("title score = %.2f, want a full match on the name the EP lists it under", score)
 	}
 	// "(alternate version)" qualifies Coney Island, not Stability.
 	if variant {
-		t.Error("penalised for a qualifier belonging to the other song in the medley")
+		t.Error("penalised for a qualifier belonging to the other song on the track")
 	}
 }
 
-// A qualifier on the song that actually matched must still count.
-func TestTitleScoreKeepsVariantOnTheMatchedSong(t *testing.T) {
+// A qualifier on the name that matched must still count.
+func TestTitleScoreKeepsVariantOnTheMatchedName(t *testing.T) {
 	in := newMatchInput(models.Track{Name: "Stability"})
-	if _, variant := in.titleScore("Stability (live) / Coney Island"); !variant {
-		t.Error("expected the live qualifier on the matched song to be penalised")
+
+	rec := recording("Stability / Coney Island", "Death Cab for Cutie", 741600,
+		listedAs(release("A Live One", "A Live One", "2003-01-01", "US"), "Stability (live)"))
+
+	if _, variant := in.titleScore(rec); !variant {
+		t.Error("expected the live qualifier on the matched name to be penalised")
 	}
 }
 
-// A DJ mix is catalogued with its whole tracklist as the title. Read as a
-// medley it matches every song in the set, and since a mix credits every artist
-// it plays, artist agrees too -- which sent Tomoko Aran's "I'm in Love" to a
-// 25-song yacht rock mix on an album it has nothing to do with.
-func TestTitleScoreDoesNotTreatATracklistAsAMedley(t *testing.T) {
+// A DJ mix is one track listed under its whole tracklist, so there is no
+// per-song name to match -- and a mix credits every artist it plays.
+func TestTitleScoreDoesNotMatchASongInsideAMix(t *testing.T) {
 	in := newMatchInput(models.Track{Name: "I'm in Love", Album: "浮遊空間"})
 
-	score, _ := in.titleScore("Side A (intro) / Sun Trails / Tasogare / Seven / Slowyazi / You / " +
-		"Plastic Love / Fools / Hit n Run / Dreams / Cruise / I’m in Love / I’m Not in Love")
+	tracklist := "Side A (intro) / Sun Trails / Tasogare / Seven / Slowyazi / You / " +
+		"Plastic Love / Fools / Hit n Run / Dreams / Cruise / I’m in Love / I’m Not in Love"
+	rec := recording(tracklist, "Various Artists", 0,
+		listedAs(release("Modern Yacht Rock", "Modern Yacht Rock", "2019-01-01", "US"), tracklist))
+
+	score, _ := in.titleScore(rec)
 	if score > 0.5 {
-		t.Errorf("title score = %.2f, want a tracklist to be scored whole rather than per song", score)
+		t.Errorf("title score = %.2f, want a mix to be scored whole rather than per song", score)
 	}
 }
 
-// A slash that is part of the name must not be read as a medley separator.
-func TestTitleScoreLeavesNonMedleySlashesAlone(t *testing.T) {
-	in := newMatchInput(models.Track{Name: "Sgt. Pepper's Lonely Hearts Club Band / With a Little Help From My Friends"})
-	score, _ := in.titleScore("Sgt. Pepper's Lonely Hearts Club Band / With a Little Help From My Friends")
+// A slash that is part of the name must still match in full.
+func TestTitleScoreLeavesSlashesInRealNamesAlone(t *testing.T) {
+	const title = "Sgt. Pepper's Lonely Hearts Club Band / With a Little Help From My Friends"
+	in := newMatchInput(models.Track{Name: title})
+
+	rec := recording(title, "The Beatles", 0,
+		listedAs(release("Sgt. Pepper's", "Sgt. Pepper's", "1967-06-01", "GB"), title))
+
+	score, _ := in.titleScore(rec)
 	if score < 0.99 {
 		t.Errorf("whole-title match = %.2f, want the full string to still win", score)
 	}

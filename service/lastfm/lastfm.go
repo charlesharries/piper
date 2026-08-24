@@ -428,7 +428,7 @@ func (l *Service) processTracks(ctx context.Context, username string, tracks []T
 
 		hydrateCtx := musicbrainz.WithEventContext(ctx,
 			slog.Int64("user_id", user.ID), slog.String("play_source", "lastfm"))
-		hydratedTrack, err := musicbrainz.HydrateTrackContext(hydrateCtx, l.musicBrainzService, baseTrack)
+		hydratedTrack, err := l.musicBrainzService.HydrateTrack(hydrateCtx, baseTrack)
 		if err != nil {
 			l.logger.Printf("error hydrating track for user %s: %s - %s: %v", username, track.Artist.Text, track.Name, err)
 			// we can use the track without MBIDs, it's still valid

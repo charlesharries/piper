@@ -98,7 +98,7 @@ func TestHydrationEventRecordsAMatch(t *testing.T) {
 	want(t, event, rec.Releases[0].ReleaseGroup.ID, "out", "release_group_mbid")
 
 	want(t, event, minConfidence, "threshold")
-	want(t, event, float64(1), "search", "won_at_tier")
+	want(t, event, "isrc", "search", "won_at_tier")
 	if _, ok := event["score"]; !ok {
 		t.Errorf("event carries no score:\n%v", event)
 	}
@@ -120,8 +120,8 @@ func TestHydrationEventCarriesCallerContext(t *testing.T) {
 
 	ctx := WithEventContext(context.Background(),
 		slog.Int64("user_id", 7), slog.String("play_source", "spotify"))
-	if _, err := HydrateTrackContext(ctx, svc, dreams()); err != nil {
-		t.Fatalf("HydrateTrackContext() error = %v", err)
+	if _, err := svc.HydrateTrack(ctx, dreams()); err != nil {
+		t.Fatalf("HydrateTrack() error = %v", err)
 	}
 
 	event := decodeEvent(t, logs)

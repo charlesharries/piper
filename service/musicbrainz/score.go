@@ -2,27 +2,21 @@ package musicbrainz
 
 import (
 	"fmt"
-	"log/slog"
 	"math"
 	"sort"
 	"strings"
-	"unicode"
-
-	"golang.org/x/text/unicode/norm"
 
 	"github.com/teal-fm/piper/models"
 )
 
+// This file answers one question: is this the right *performance*? Picking the
+// release it lives on is release.go's separate scoring system.
+
 // minConfidence is the score a candidate must reach before we attach its MBIDs
-// to a play. MusicBrainz ranks by query match, not by correctness, so its top
-// hit is frequently an outtake, a live take or a karaoke version. Below this
-// threshold we publish no MBID at all, which is better than publishing a wrong
-// one to a user's repo.
+// to a play.
 const minConfidence = 0.62
 
-// Signal weights. A signal only contributes when we have the data for it, so a
-// source without durations (Last.fm) is scored on the remaining signals rather
-// than penalised.
+// Signal weights.
 const (
 	weightTitle    = 3.0
 	weightArtist   = 3.0
@@ -31,174 +25,33 @@ const (
 	weightMBScore  = 0.25
 )
 
-// qualifierPenalty is subtracted when the MusicBrainz title carries a variant
-// qualifier the incoming play does not, e.g. matching "Dreams" against
-// "Dreams (outtake)".
+// qualifierPenalty is subtracted when a candidate carries a variant qualifier
+// the play did not ask for, e.g. matching "Dreams" against "Dreams (outtake)".
 const qualifierPenalty = 0.25
 
 // durationConflictPenalty is subtracted when the play and the candidate both
-// carry a length and they disagree by more than durationScore tolerates.
-//
-// Weighting alone cannot express this. Duration is two parts in nine, so a
-// candidate that agrees on title and artist starts at 0.667 and clears
-// minConfidence on those two signals alone -- which is how a soundtrack, where
-// every candidate shares a title and an artist, resolved to bootleg cuts
-// running minutes longer than what was played. Twenty seconds apart is not a
-// weak signal, it is a different recording.
+// carry a length and disagree by more than durationScore tolerates.
 const durationConflictPenalty = 0.25
 
 // uncorroboratedPenalty is subtracted when title and artist are the only
-// signals available.
-//
-// Two signals agreeing is not the evidence five are, but the score is a
-// weighted mean whose denominator shrinks with the signals it lacks, so a bare
-// title-and-artist match scores a perfect 1.00. Every recording of a song --
-// every live take, every karaoke version -- shares both.
+// signals available -- this could be basically anything as far as we know!
 const uncorroboratedPenalty = 0.4
 
-// normalize prepares a string for comparison: it strips diacritics, lowercases,
-// spells out '&', and reduces everything else to single-space-separated
-// alphanumerics. This is what lets "Power, Corruption & Lies" compare equal to
-// "Power Corruption and Lies".
-func normalize(s string) string {
-	s = strings.ToLower(strings.TrimSpace(s))
-	s = strings.ReplaceAll(s, "&", " and ")
-
-	var b strings.Builder
-	b.Grow(len(s))
-	lastWasSpace := true
-	for _, r := range norm.NFD.String(s) {
-		switch {
-		case unicode.Is(unicode.Mn, r):
-			// Combining mark left over from decomposition; drop it so that
-			// "Beyoncé" and "Beyonce" compare equal.
-			continue
-		case unicode.IsLetter(r) || unicode.IsDigit(r):
-			b.WriteRune(r)
-			lastWasSpace = false
-		case !lastWasSpace:
-			b.WriteRune(' ')
-			lastWasSpace = true
-		}
-	}
-	return strings.TrimSpace(b.String())
-}
-
-// levenshtein returns the edit distance between two rune slices.
-func levenshtein(a, b []rune) int {
-	if len(a) == 0 {
-		return len(b)
-	}
-	if len(b) == 0 {
-		return len(a)
-	}
-
-	prev := make([]int, len(b)+1)
-	curr := make([]int, len(b)+1)
-	for j := range prev {
-		prev[j] = j
-	}
-
-	for i := 1; i <= len(a); i++ {
-		curr[0] = i
-		for j := 1; j <= len(b); j++ {
-			cost := 1
-			if a[i-1] == b[j-1] {
-				cost = 0
-			}
-			curr[j] = min(min(curr[j-1]+1, prev[j]+1), prev[j-1]+cost)
-		}
-		prev, curr = curr, prev
-	}
-	return prev[len(b)]
-}
-
-// similarity scores two already-normalized strings in [0,1].
-func similarity(a, b string) float64 {
-	if a == b {
-		if a == "" {
-			return 0
-		}
-		return 1
-	}
-	if a == "" || b == "" {
-		return 0
-	}
-
-	ra, rb := []rune(a), []rune(b)
-	longest := max(len(ra), len(rb))
-	return 1 - float64(levenshtein(ra, rb))/float64(longest)
-}
-
-// splitQualifier separates a title from a trailing variant qualifier, e.g.
-// "Dreams (outtake)" or "Dreams - 2004 Remaster". Both halves are returned
-// normalized; an empty qualifier means the title carries none.
-func splitQualifier(title string) (base, qualifier string) {
-	rawBase, rawQualifier := splitQualifierRaw(title)
-	return normalize(rawBase), normalize(rawQualifier)
-}
-
-// splitQualifierRaw is splitQualifier without the normalizing, for callers that
-// need the title as written -- a search query, which MusicBrainz matches against
-// titles as they are catalogued.
-func splitQualifierRaw(title string) (base, qualifier string) {
-	trimmed := strings.TrimSpace(title)
-
-	// Bracketed suffix: (...), [...], {...}
-	for _, pair := range []struct{ open, close string }{{"(", ")"}, {"[", "]"}, {"{", "}"}} {
-		if !strings.HasSuffix(trimmed, pair.close) {
-			continue
-		}
-		if idx := strings.LastIndex(trimmed, pair.open); idx > 0 {
-			inner := trimmed[idx+len(pair.open) : len(trimmed)-len(pair.close)]
-			return strings.TrimSpace(trimmed[:idx]), strings.TrimSpace(inner)
-		}
-	}
-
-	// Dash suffix: "Title - 2004 Remaster". Only treat it as a qualifier when
-	// the dash is surrounded by spaces, so hyphenated titles survive intact.
-	for _, sep := range []string{" - ", " – ", " — "} {
-		if idx := strings.LastIndex(trimmed, sep); idx > 0 {
-			return strings.TrimSpace(trimmed[:idx]), strings.TrimSpace(trimmed[idx+len(sep):])
-		}
-	}
-
-	return trimmed, ""
-}
-
-// isVariantQualifier reports whether a qualifier marks a different version of a
-// recording rather than being part of its name. It reuses the vocabulary the
-// MetadataCleaner already relies on.
-func isVariantQualifier(qualifier string) bool {
-	if qualifier == "" {
-		return false
-	}
-	for _, word := range guffParenWords {
-		if strings.Contains(qualifier, normalize(word)) {
-			return true
-		}
-	}
-	return false
-}
+// qualifierAgreement is how closely two qualifiers must match before a
+// candidate's counts as the one the play asked for.
+const qualifierAgreement = 0.8
 
 // matchInput is the normalized view of an incoming play, computed once and
 // reused across every candidate.
 type matchInput struct {
-	title          string
-	titleBase      string
-	qualifier      string
-	artists        []string
-	album          string
-	albumBase      string
-	albumQualifier string
-	durationMs     int64
-	isrc           string
+	title      reading
+	artists    []string
+	album      reading
+	durationMs int64
+	isrc       string
 }
 
 func newMatchInput(track models.Track) matchInput {
-	base, qualifier := splitQualifier(track.Name)
-	albumBase, albumQualifier := splitQualifier(track.Album)
-
 	artists := make([]string, 0, len(track.Artist))
 	for _, a := range track.Artist {
 		if n := normalize(a.Name); n != "" {
@@ -207,52 +60,97 @@ func newMatchInput(track models.Track) matchInput {
 	}
 
 	return matchInput{
-		title:          normalize(track.Name),
-		titleBase:      base,
-		qualifier:      qualifier,
-		artists:        artists,
-		album:          normalize(track.Album),
-		albumBase:      albumBase,
-		albumQualifier: albumQualifier,
-		durationMs:     track.DurationMs,
-		isrc:           strings.ToUpper(strings.TrimSpace(track.ISRC)),
+		title:      readingOf(track.Name),
+		artists:    artists,
+		album:      readingOf(track.Album),
+		durationMs: track.DurationMs,
+		isrc:       strings.ToUpper(strings.TrimSpace(track.ISRC)),
 	}
 }
 
-// medleySeparator joins the songs of a combined track. MusicBrainz titles a
-// two-song recording "A / B", where a music service reports only the song the
-// listener thinks they are playing -- Death Cab's "Stability" is catalogued as
-// "Stability / Coney Island (alternate version)".
-const medleySeparator = " / "
-
-// maxMedleySongs bounds how many songs a slash-separated title may name before
-// it stops being read as a medley.
-//
-// The same separator catalogues a DJ mix, whose title is the whole tracklist of
-// the set. Scoring on the best-matching song means such a recording matches any
-// song it contains at 1.00, and a mix credits every artist it plays, so artist
-// matches outright too -- which is how a play of Tomoko Aran's "I'm in Love"
-// resolved to a 25-song yacht rock mix. Beyond a few songs a title is a
-// tracklist, and the play belongs to one of the recordings it was assembled
-// from rather than to the assembly.
-const maxMedleySongs = 3
-
-// titleScore compares the incoming title against a candidate's, and reports
-// whether the candidate carries an unmatched variant qualifier.
-//
-// A medley is scored on its best-matching song rather than the whole string,
-// which also decides whose qualifier is judged: in "A / B (alternate version)"
-// the qualifier belongs to B, and a play of A should not be penalised for it.
-func (in matchInput) titleScore(recTitle string) (score float64, unmatchedVariant bool) {
-	// The title as a whole comes first, since plenty of titles contain a slash
-	// without being a medley.
-	score, unmatchedVariant = in.compareTitle(recTitle)
-
-	if parts := strings.Split(recTitle, medleySeparator); len(parts) > 1 && len(parts) <= maxMedleySongs {
-		for _, part := range parts {
-			if partScore, partVariant := in.compareTitle(part); partScore > score {
-				score, unmatchedVariant = partScore, partVariant
+// scoreRecording rates a candidate in [0,1] against the incoming play and
+// returns the breakdown behind it, for the -explain flag and the log event.
+func scoreRecording(in matchInput, rec Recording) (float64, signals) {
+	// An ISRC identifies a recording outright: if the candidate carries the one
+	// the service gave us, nothing else needs checking.
+	if in.isrc != "" {
+		for _, isrc := range rec.ISRCs {
+			if strings.EqualFold(strings.TrimSpace(isrc), in.isrc) {
+				return 1, signals{{"isrc", 1}}
 			}
+		}
+	}
+
+	var card scorecard
+
+	title, unmatchedVariant := in.titleScore(rec)
+	card.add("title", title, weightTitle)
+	card.add("artist", in.artistScore(rec.ArtistCredit), weightArtist)
+
+	// corroborated records whether anything beyond title and artist had a view.
+	var corroborated, durationConflict bool
+
+	if in.durationMs > 0 && rec.Length > 0 {
+		duration := durationScore(in.durationMs, int64(rec.Length))
+		card.add("duration", duration, weightDuration)
+		durationConflict = duration == 0
+		corroborated = true
+	}
+	if in.album.full != "" && len(rec.Releases) > 0 {
+		card.add("album", in.albumScore(rec.Releases, rec.Title), weightAlbum)
+		corroborated = true
+	}
+	if rec.Score > 0 {
+		// MusicBrainz's own query score says how well a record matched the
+		// query, not whether it is the right recording, so it breaks ties but
+		// doesn't count as corroboration.
+		card.add("mb", float64(rec.Score)/100, weightMBScore)
+	}
+
+	if unmatchedVariant {
+		card.penalise("variant", qualifierPenalty)
+	}
+	if rec.Video {
+		card.penalise("video", qualifierPenalty)
+	}
+	if durationConflict {
+		card.penalise("conflict", durationConflictPenalty)
+	}
+	if !corroborated {
+		card.penalise("uncorroborated", uncorroboratedPenalty)
+	}
+
+	return math.Max(0, card.score()), card.signals
+}
+
+// trackTitles returns the names the candidate's releases list it under: where a
+// recording is titled after every song on a combined track, these name the one
+// song a service reports.
+func (rec Recording) trackTitles() []string {
+	var titles []string
+	seen := map[string]bool{rec.Title: true}
+	for _, release := range rec.Releases {
+		for _, medium := range release.Media {
+			for _, track := range medium.Tracks {
+				if track.Title == "" || seen[track.Title] {
+					continue
+				}
+				seen[track.Title] = true
+				titles = append(titles, track.Title)
+			}
+		}
+	}
+	return titles
+}
+
+// titleScore compares the incoming title against every name the candidate goes
+// by, reporting whether the name that matched carries an unasked-for qualifier.
+func (in matchInput) titleScore(rec Recording) (score float64, unmatchedVariant bool) {
+	score, unmatchedVariant = in.compareTitle(rec.Title)
+
+	for _, title := range rec.trackTitles() {
+		if trackScore, trackVariant := in.compareTitle(title); trackScore > score {
+			score, unmatchedVariant = trackScore, trackVariant
 		}
 	}
 	return score, unmatchedVariant
@@ -261,23 +159,24 @@ func (in matchInput) titleScore(recTitle string) (score float64, unmatchedVarian
 // compareTitle rates one title against the incoming play, reporting whether it
 // carries a variant qualifier the play never asked for.
 func (in matchInput) compareTitle(title string) (float64, bool) {
-	base, qualifier := splitQualifier(title)
-
-	// Compare both the full titles and the qualifier-stripped bases, and keep
-	// the better reading. Either side may carry a qualifier the other lacks.
-	score := math.Max(
-		similarity(in.title, normalize(title)),
-		similarity(in.titleBase, base),
-	)
-
-	unmatched := isVariantQualifier(qualifier) && similarity(in.qualifier, qualifier) < 0.8
-	return score, unmatched
+	candidate := readingOf(title)
+	unmatched := isVariantQualifier(candidate.qualifier) &&
+		similarity(in.title.qualifier, candidate.qualifier) < qualifierAgreement
+	return in.title.agrees(candidate), unmatched
 }
 
-// sortNameReadings renders a MusicBrainz sort name the ways a music service
-// might credit it. Personal names sort inverted ("Yonezu, Kenshi"), so the
-// comma-swapped reading is offered alongside the literal one; band and mononym
-// sort names carry no comma and yield just the one.
+// compareAlbum matches a release title against the incoming album name.
+func (in matchInput) compareAlbum(title string) float64 {
+	return in.album.agrees(readingOf(title))
+}
+
+// artistNameAgreement is how closely an artist has to answer to the name a play
+// credited before their MBID is trusted to scope a search.
+const artistNameAgreement = 0.9
+
+// sortNameReadings renders a sort name the ways a service might credit it.
+// Personal names sort inverted ("Yonezu, Kenshi"), so the comma-swapped reading
+// is offered alongside the literal one.
 func sortNameReadings(sortName string) []string {
 	if strings.TrimSpace(sortName) == "" {
 		return nil
@@ -289,46 +188,33 @@ func sortNameReadings(sortName string) []string {
 	return readings
 }
 
-// artistNameAgreement is how closely an artist has to answer to the name a play
-// credited before their MBID is trusted to scope a search to their catalogue.
-// It is deliberately strict: an artist's name is all that ties them to the play,
-// and "Eiko Ishibashi Trio" is a different act from Eiko Ishibashi.
-const artistNameAgreement = 0.9
-
 // goesBy rates how strongly an artist answers to a name, across every reading
 // MusicBrainz files them under.
 func (a Artist) goesBy(name string) float64 {
-	normalized := normalize(name)
-	best := similarity(normalized, normalize(a.Name))
-	for _, reading := range sortNameReadings(a.SortName) {
-		best = math.Max(best, similarity(normalized, reading))
-	}
+	names := append([]string{normalize(a.Name)}, sortNameReadings(a.SortName)...)
 	for _, alias := range a.Aliases {
-		best = math.Max(best, similarity(normalized, normalize(alias.Name)))
+		names = append(names, normalize(alias.Name))
 	}
-	return best
+	return bestSimilarity([]string{normalize(name)}, names)
 }
 
-// artistScore returns the best similarity between any incoming artist name and
+// artistScore returns the best agreement between any incoming artist name and
 // any name on the candidate's artist credit.
 func (in matchInput) artistScore(credits []ArtistCredit) float64 {
 	if len(in.artists) == 0 || len(credits) == 0 {
 		return 0
 	}
 
-	candidates := make([]string, 0, len(credits)*4+1)
+	names := make([]string, 0, len(credits)*4+1)
 	var joined strings.Builder
 	for _, c := range credits {
-		candidates = append(candidates, normalize(c.Name), normalize(c.Artist.Name))
+		names = append(names, normalize(c.Name), normalize(c.Artist.Name))
 
-		// In rare cases, SortName is the only Latin name available for an artist
-		candidates = append(candidates, sortNameReadings(c.Artist.SortName)...)
-
-		// Nor is the sort name always Latin. An artist held in another script is
-		// still credited by their Latin name on a music service, and an alias is
-		// where that spelling is recorded.
+		// For an artist held in a non-Latin script, the sort name or an alias
+		// is where the Latin spelling a service credits them by lives.
+		names = append(names, sortNameReadings(c.Artist.SortName)...)
 		for _, alias := range c.Artist.Aliases {
-			candidates = append(candidates, normalize(alias.Name))
+			names = append(names, normalize(alias.Name))
 		}
 
 		joined.WriteString(c.Name)
@@ -336,21 +222,15 @@ func (in matchInput) artistScore(credits []ArtistCredit) float64 {
 	}
 	// The full credit line, so "Calvin Harris & Dua Lipa" can match an input
 	// that kept both names.
-	candidates = append(candidates, normalize(joined.String()))
+	names = append(names, normalize(joined.String()))
 
-	var best float64
-	for _, in := range in.artists {
-		for _, c := range candidates {
-			best = math.Max(best, similarity(in, c))
-		}
-	}
-	return best
+	return bestSimilarity(in.artists, names)
 }
 
 // durationScore grades how closely two durations agree. Recordings of the same
-// song differ by seconds; an outtake, live take or extended mix differs by far
-// more, which makes this the strongest signal available for separating the
-// candidates MusicBrainz returns at identical query scores.
+// song differ by seconds and an outtake or live take by far more, which makes
+// this the strongest signal for separating candidates MusicBrainz returns at
+// identical query scores.
 func durationScore(a, b int64) float64 {
 	delta := a - b
 	if delta < 0 {
@@ -370,69 +250,53 @@ func durationScore(a, b int64) float64 {
 	}
 }
 
-// albumScore rates the best album the candidate could be attributed to, using
-// the same scoring the release picker uses.
-//
-// Grading on release quality rather than title similarity alone is what couples
-// the two choices: several recordings of a song routinely score identically on
-// title, artist and duration, and the one that matters is the one that lives on
-// a good pressing of the requested album. A recording whose only release is a
-// bootleg remix should lose to one on the official issue, even though both
-// releases carry the album's name.
-func (in matchInput) albumScore(releases []Release, trackTitle string) float64 {
-	if in.album == "" || len(releases) == 0 {
-		return 0
-	}
-
-	var best float64
-	for _, r := range releases {
-		score, _ := scoreRelease(in, r, trackTitle, nil)
-		best = math.Max(best, score)
-		if best >= 0.99 {
-			break
-		}
-	}
-	return math.Min(1, math.Max(0, best))
-}
-
 // albumAgreement is the album score below which a recording is treated as not
 // belonging to the album the play named. Correct attributions land near 1;
-// scores around a half mean the best release the recording can be attributed to
-// is a different record that merely shares an artist.
+// around a half means a different record that merely shares an artist.
 const albumAgreement = 0.8
 
-// contradicts reports whether what the music service told us argues against a
-// recording, naming the signal that objected. It is the check ListenBrainz's
-// answer has to pass that a ranked search result does not need: a search winner
-// already beat every alternative on these signals, where ListenBrainz's answer
-// was never compared to anything.
-//
-// Each test stays silent when the evidence for it is missing -- no album named,
-// no releases to judge, no length on either side -- because absence is not
-// evidence against.
-func (in matchInput) contradicts(rec Recording) (string, bool) {
-	// Length first: it is the cheap test, and the one that catches a bootleg
-	// pressing catalogued under the album's own title, which the album test
-	// cannot see.
-	if in.durationMs > 0 && rec.Length > 0 && durationScore(in.durationMs, int64(rec.Length)) == 0 {
-		return "length", true
+// albumScore rates the best album the candidate could be attributed to, by
+// running the release scorer over its releases. Grading on release quality
+// rather than title similarity is what couples the two scoring systems: a
+// recording whose only release is a bootleg should lose to one on the official
+// issue, even though both releases carry the album's name.
+func (in matchInput) albumScore(releases []Release, trackTitle string) float64 {
+	if in.album.full == "" || len(releases) == 0 {
+		return 0
 	}
-	if in.album != "" && len(rec.Releases) > 0 && in.albumScore(rec.Releases, rec.Title) < albumAgreement {
-		return "album", true
-	}
-	return "", false
+	_, score := bestRelease(in, releases, trackTitle, nil)
+	return math.Min(1, math.Max(0, score))
 }
 
-// compareAlbum matches a release title against the incoming album name, trying
-// the name as given and with any edition suffix removed, since services report
-// "Rumours (Super Deluxe)" where MusicBrainz has "Rumours".
-func (in matchInput) compareAlbum(title string) float64 {
-	full := normalize(title)
-	base, _ := splitQualifier(title)
-	return math.Max(
-		math.Max(similarity(in.album, full), similarity(in.albumBase, base)),
-		math.Max(similarity(in.albumBase, full), similarity(in.album, base)),
-	)
+// scorecard accumulates a weighted mean of signals, less any flat penalties.
+// Both scoring systems are built on it: a signal is added only when the data
+// for it exists, so the denominator shrinks to the evidence actually available,
+// and penalties then answer for what that leaves unsaid.
+type scorecard struct {
+	weighted float64
+	weight   float64
+	penalty  float64
+	signals  signals
+}
+
+func (c *scorecard) add(name string, score, weight float64) {
+	c.weighted += score * weight
+	c.weight += weight
+	c.signals = append(c.signals, signal{name, score})
+}
+
+func (c *scorecard) penalise(name string, amount float64) {
+	c.penalty += amount
+	c.signals = append(c.signals, signal{name, -amount})
+}
+
+// score is the weighted mean less the penalties, unclamped: bestRelease orders
+// on the raw value, so callers that publish a score clamp it themselves.
+func (c *scorecard) score() float64 {
+	if c.weight == 0 {
+		return 0
+	}
+	return c.weighted/c.weight - c.penalty
 }
 
 // signal is one component of a score: what was compared, and how well it
@@ -443,9 +307,8 @@ type signal struct {
 }
 
 // signals is a score's full breakdown, in the order the components were
-// applied. It renders as "title=1.00 artist=0.93" for the CLI, and expands into
-// the hydration event's `sig` group, so a bad match can be queried by the
-// signal that let it through rather than only read by eye.
+// applied. It renders for the CLI and expands into the event's `sig` group, so
+// a bad match can be queried by the signal that let it through.
 type signals []signal
 
 func (s signals) String() string {
@@ -456,96 +319,15 @@ func (s signals) String() string {
 	return strings.Join(parts, " ")
 }
 
-// attrs renders the breakdown as slog attributes for the event's `sig` group.
-// The group is what keeps a signal named after a field the event already
-// carries -- title, artist, album -- from colliding with it.
-func (s signals) attrs() []any {
-	attrs := make([]any, len(s))
-	for i, sig := range s {
-		attrs[i] = slog.Float64(sig.name, logRound(sig.value))
-	}
-	return attrs
-}
-
-// logRound trims a score to the precision worth reading. Float64's full
-// seventeen digits are noise in a log line, but rounding coarsely enough to
-// print 0.619 as 0.62 would hide why a candidate fell short of minConfidence.
-func logRound(v float64) float64 {
-	return math.Round(v*1000) / 1000
-}
-
-// scoreRecording rates a candidate in [0,1] against the incoming play and
-// returns a human-readable breakdown for the -explain CLI flag and logs.
-func scoreRecording(in matchInput, rec Recording) (float64, signals) {
-	// An ISRC is a globally unique identifier for a recording. If the candidate
-	// carries the one the service gave us, nothing else needs checking.
-	if in.isrc != "" {
-		for _, isrc := range rec.ISRCs {
-			if strings.EqualFold(strings.TrimSpace(isrc), in.isrc) {
-				return 1, signals{{"isrc", 1}}
-			}
+// value returns what a named signal scored, reporting false when it never
+// applied -- the difference between disagreement and no evidence either way.
+func (s signals) value(name string) (float64, bool) {
+	for _, sig := range s {
+		if sig.name == name {
+			return sig.value, true
 		}
 	}
-
-	var weighted, total float64
-	reasons := make(signals, 0, 6)
-
-	add := func(name string, score, weight float64) {
-		weighted += score * weight
-		total += weight
-		reasons = append(reasons, signal{name, score})
-	}
-
-	title, unmatchedVariant := in.titleScore(rec.Title)
-	add("title", title, weightTitle)
-	add("artist", in.artistScore(rec.ArtistCredit), weightArtist)
-
-	// corroborated records whether anything beyond title and artist had a view.
-	// Both duration and album are absent often enough on their own -- Last.fm
-	// supplies no durations, and a search result carries no releases to judge an
-	// album by -- that either one alone counts as corroboration.
-	var corroborated, durationConflict bool
-
-	if in.durationMs > 0 && rec.Length > 0 {
-		duration := durationScore(in.durationMs, int64(rec.Length))
-		add("duration", duration, weightDuration)
-		durationConflict = duration == 0
-		corroborated = true
-	}
-	if in.album != "" && len(rec.Releases) > 0 {
-		add("album", in.albumScore(rec.Releases, rec.Title), weightAlbum)
-		corroborated = true
-	}
-	if rec.Score > 0 {
-		// MusicBrainz's own query score says how well a record matched the
-		// query, not whether it is the right recording, so it does not count as
-		// corroboration however high it runs.
-		add("mb", float64(rec.Score)/100, weightMBScore)
-	}
-
-	if total == 0 {
-		return 0, reasons
-	}
-
-	score := weighted / total
-	if unmatchedVariant {
-		score -= qualifierPenalty
-		reasons = append(reasons, signal{"variant", -qualifierPenalty})
-	}
-	if rec.Video {
-		score -= qualifierPenalty
-		reasons = append(reasons, signal{"video", -qualifierPenalty})
-	}
-	if durationConflict {
-		score -= durationConflictPenalty
-		reasons = append(reasons, signal{"conflict", -durationConflictPenalty})
-	}
-	if !corroborated {
-		score -= uncorroboratedPenalty
-		reasons = append(reasons, signal{"uncorroborated", -uncorroboratedPenalty})
-	}
-
-	return math.Max(0, score), reasons
+	return 0, false
 }
 
 // candidate is a scored recording along with the release chosen for it.
@@ -564,14 +346,6 @@ func (c candidate) explain() string {
 	}
 	return fmt.Sprintf("%.3f  %-45s  %-35s  [%s]",
 		c.score, truncate(title, 45), truncate(release, 35), c.reasons)
-}
-
-func truncate(s string, n int) string {
-	r := []rune(s)
-	if len(r) <= n {
-		return s
-	}
-	return string(r[:n-1]) + "…"
 }
 
 // rankCandidates scores every recording, best first.

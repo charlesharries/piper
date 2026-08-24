@@ -28,10 +28,10 @@ func bestCandidate(in matchInput, recordings []Recording) (candidate, bool) {
 }
 
 // queries renders tier queries for failure messages.
-func queries(tiers []searchRequest) []string {
+func queries(tiers []tier) []string {
 	out := make([]string, len(tiers))
-	for i, tier := range tiers {
-		out[i] = tier.query
+	for i, t := range tiers {
+		out[i] = t.query
 	}
 	return out
 }
@@ -65,6 +65,16 @@ func recording(title, artist string, lengthMs int, releases ...Release) Recordin
 		rec.ArtistCredit = []ArtistCredit{credit}
 	}
 	return rec
+}
+
+// listedAs gives a release its track listing.
+func listedAs(rel Release, trackTitles ...string) Release {
+	tracks := make([]Track, 0, len(trackTitles))
+	for _, title := range trackTitles {
+		tracks = append(tracks, Track{Title: title})
+	}
+	rel.Media = []Medium{{Tracks: tracks}}
+	return rel
 }
 
 // release builds an official album release in the given release group.

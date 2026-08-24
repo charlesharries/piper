@@ -13,29 +13,20 @@ import (
 // matches what the user's client has reported, but that the release has some
 // cover art to show on your sick AppView.
 
-// browseReleasesLimit is the page size for the release browse. 100 items
-// should be more than enough to find a release with artwork.
+// browseReleasesLimit is the page size for the release browse.
 const browseReleasesLimit = 100
 
 // coverArtTimeout bounds the artwork request.
 const coverArtTimeout = 3 * time.Second
 
-// buildCoverArtEndpoint addresses a release's front cover. We query for an
-// unsized version deliberately: possible that some sizes just don't exist!
+// buildCoverArtEndpoint addresses a release's front cover.
 func buildCoverArtEndpoint(releaseMBID string) string {
 	return "https://coverartarchive.org/release/" + url.PathEscape(releaseMBID) + "/front"
 }
 
 // hasCoverArt reports whether the Cover Art Archive holds a front cover for a
-// release.
-//
-// Most of the time, the releaseMbId that we've chosen has cover art. To save
-// ourselves a query to the MusicBrainz API for all releases with cover art, we
-// can first check whether the Cover Art Archive API (i.e. not the MusicBrainz
-// API, and therefore not bound by the 1 req/s rate limit!) has cover art for
-// the current release. Just do a HEAD request so it's quick!
-//
-// If no cover art is found, well, then we have to go to MusicBrainz.
+// release. We don't actually care about retrieving the cover art here -- just
+// checking whether it exists.
 func (s *Service) hasCoverArt(ctx context.Context, releaseMBID string) bool {
 	if releaseMBID == "" {
 		return false
@@ -99,9 +90,7 @@ type pressings struct {
 }
 
 // releaseGroupPressings fetches a release group's pressings and their artwork
-// availability. A failure is reported as an empty result rather than an error:
-// artwork is a preference, and a play should still be published with the
-// release chosen on metadata alone when MusicBrainz is unreachable.
+// availability. A failure is reported as an empty result rather than an error.
 func (s *Service) releaseGroupPressings(ctx context.Context, releaseGroupID string) pressings {
 	if releaseGroupID == "" {
 		return pressings{}
@@ -136,14 +125,11 @@ func (s *Service) releaseGroupPressings(ctx context.Context, releaseGroupID stri
 // with artwork availability added as a scoring signal.
 //
 // The pressing chosen on metadata grounds usually already has art, so ask the
-// Cover Art Archive about that one first and stop there when it does. Only when
-// it has none is the release group browsed, which is the expensive half: it is
-// a MusicBrainz call, and MusicBrainz permits one request per second across the
-// whole process. The browse result is cached per release group.
-//
-// The incumbent is re-scored under the same signal rather than swapped blindly,
-// so a pressing only loses to one that is at least as good an answer for the
-// album.
+// Cover Art Archive about that one first and stop there when it does; only when
+// it has none is the release group browsed, at the cost of a rate-limited
+// MusicBrainz request. The incumbent is re-scored under the new signal rather
+// than swapped blindly, so a pressing only loses to one that is at least as
+// good an answer for the album.
 func (s *Service) preferReleaseWithArt(ctx context.Context, in matchInput, rec Recording, release *Release) *Release {
 	if release == nil || release.ReleaseGroup == nil {
 		return release
@@ -171,7 +157,7 @@ func (s *Service) preferReleaseWithArt(ctx context.Context, in matchInput, rec R
 		return release
 	}
 
-	better, _, _ := bestRelease(in, found.releases, rec.Title, found.artOwners)
+	better, _ := bestRelease(in, found.releases, rec.Title, found.artOwners)
 	if better == nil || !found.artOwners[better.ID] {
 		ev.artOutcome = artKept
 		return release

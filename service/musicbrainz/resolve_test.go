@@ -480,7 +480,7 @@ func TestApplyMatchPreservesPlayMetadata(t *testing.T) {
 func TestHydrateTrackErrorsWithoutConfidentMatch(t *testing.T) {
 	svc, _ := newTestService(t)
 
-	got, err := HydrateTrack(svc, models.Track{
+	got, err := svc.HydrateTrack(context.Background(), models.Track{
 		Name:   "asdfgh",
 		Artist: []models.Artist{{Name: "qwerty"}},
 	})
@@ -489,6 +489,31 @@ func TestHydrateTrackErrorsWithoutConfidentMatch(t *testing.T) {
 	}
 	if got != nil {
 		t.Errorf("HydrateTrack() = %v, want nil", got)
+	}
+}
+
+// The doubt cast on a ListenBrainz answer is read off the breakdown
+// scoreRecording already produced, so a signal that never applied cannot object.
+func TestSignalsDisagreement(t *testing.T) {
+	tests := []struct {
+		name string
+		sig  signals
+		want string
+	}{
+		{name: "agreement is silent", sig: signals{{"duration", 1}, {"album", 1}}},
+		{name: "a length apart objects", sig: signals{{"duration", 0}, {"album", 1}}, want: "length"},
+		{name: "a different album objects", sig: signals{{"duration", 1}, {"album", 0.5}}, want: "album"},
+		{name: "no evidence is not evidence against", sig: signals{{"title", 1}, {"artist", 1}}},
+		{name: "an isrc settles it", sig: signals{{"isrc", 1}}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, doubted := tt.sig.disagreement()
+			if doubted != (tt.want != "") || reason != tt.want {
+				t.Errorf("disagreement() = %q, %v, want %q", reason, doubted, tt.want)
+			}
+		})
 	}
 }
 
@@ -502,7 +527,8 @@ func TestResolveDoubtsListenBrainzWhenAlbumDisagrees(t *testing.T) {
 	wrong := recording("Stability", "Death Cab for Cutie", 740864, photoAlbum)
 	wrong.ID = "photo-album-mbid"
 
-	stabilityEP := release("The Stability EP", "The Stability EP", "2002-03-05", "US")
+	// The EP lists the track as plain "Stability", as search returns it.
+	stabilityEP := listedAs(release("The Stability EP", "The Stability EP", "2002-03-05", "US"), "Stability")
 	right := recording("Stability / Coney Island (alternate version)", "Death Cab for Cutie", 741600, stabilityEP)
 	right.ID = "stability-ep-mbid"
 
