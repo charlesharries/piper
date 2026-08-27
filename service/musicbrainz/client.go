@@ -97,7 +97,7 @@ type SearchResponse struct {
 
 type SearchParams struct {
 	Track   string
-	Artist  string
+	Artists []string // the individual names credited, however the service split them
 	Release string
 	ISRC    string
 }
@@ -246,12 +246,12 @@ func buildRecordingEndpoint(mbid string) string {
 }
 
 func (s *Service) SearchMusicBrainz(ctx context.Context, params SearchParams) ([]Recording, error) {
-	if params.Track == "" && params.Artist == "" && params.Release == "" && params.ISRC == "" {
-		return nil, fmt.Errorf("at least one search parameter (Track, Artist, Release, ISRC) must be provided")
+	if params.Track == "" && len(params.Artists) == 0 && params.Release == "" && params.ISRC == "" {
+		return nil, fmt.Errorf("at least one search parameter (Track, Artists, Release, ISRC) must be provided")
 	}
 
 	params.Track, _ = s.cleaner.CleanRecording(params.Track)
-	params.Artist, _ = s.cleaner.CleanArtist(params.Artist)
+	params.Artists = s.cleanNames(params.Artists)
 
 	return s.search(ctx, searchRequest{query: buildSearchQuery(params), limit: searchLimit})
 }

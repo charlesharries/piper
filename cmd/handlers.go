@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/spf13/viper"
@@ -236,11 +237,16 @@ func apiMusicBrainzSearch(mbService *musicbrainz.Service) http.HandlerFunc {
 
 		params := musicbrainz.SearchParams{
 			Track:   r.URL.Query().Get("track"),
-			Artist:  r.URL.Query().Get("artist"),
 			Release: r.URL.Query().Get("release"),
 		}
+		// Repeat the parameter to credit more than one artist.
+		for _, artist := range r.URL.Query()["artist"] {
+			if artist = strings.TrimSpace(artist); artist != "" {
+				params.Artists = append(params.Artists, artist)
+			}
+		}
 
-		if params.Track == "" && params.Artist == "" && params.Release == "" {
+		if params.Track == "" && len(params.Artists) == 0 && params.Release == "" {
 			jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "At least one query parameter (track, artist, release) is required"})
 			return
 		}

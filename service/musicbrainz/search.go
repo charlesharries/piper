@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/teal-fm/piper/models"
@@ -40,6 +41,7 @@ func (s *Service) searchTiers(track models.Track) []tier {
 	cleanTrack, _ := s.cleaner.CleanRecording(track.Name)
 	cleanArtist, _ := s.cleaner.CleanArtist(artist)
 	cleanAlbum, _ := s.cleaner.CleanRecording(album)
+	cleanArtists := s.cleanNames(artistNames(track))
 
 	var tiers []tier
 	seen := map[string]bool{}
@@ -64,23 +66,20 @@ func (s *Service) searchTiers(track models.Track) []tier {
 		add("isrc", searchRequest{query: buildSearchQuery(SearchParams{ISRC: track.ISRC}), limit: searchLimit}, "")
 	}
 
-	metadata("clean+album", SearchParams{Track: cleanTrack, Artist: cleanArtist, Release: cleanAlbum})
-	metadata("clean", SearchParams{Track: cleanTrack, Artist: cleanArtist})
+	metadata("clean+album", SearchParams{Track: cleanTrack, Artists: cleanArtists, Release: cleanAlbum})
+	metadata("clean", SearchParams{Track: cleanTrack, Artists: cleanArtists})
 
-	// The cleaner truncates artist credits at the first comma and strips
-	// non-Latin script entirely, so retry with what the service actually sent
-	// in case cleaning was what lost the match.
-	metadata("raw+album", SearchParams{Track: track.Name, Artist: artist, Release: album})
-	metadata("raw", SearchParams{Track: track.Name, Artist: artist})
+	// Maybe the cleaner messed up the input -- this covers the situation where
+	// the music service's artist is non-Latin but MusicBrainz holds the artist
+	// name in Latin characters.
+	metadata("raw+album", SearchParams{Track: track.Name, Artists: artistNames(track), Release: album})
+	metadata("raw", SearchParams{Track: track.Name, Artists: artistNames(track)})
 
-	// Every tier above finds an artist by the name they are catalogued under, so
-	// an artist MusicBrainz holds in a non-Latin script is unreachable by the
-	// Latin name a music service credits them with, and all of those tiers come
-	// back empty. The artist index does consult aliases, so resolving the name
-	// to an MBID and filtering on that sidesteps names altogether. See
-	// buildArtistEndpoint.
+	// Now the opposite -- the music service gave us Latin characters but the
+	// artist is non-Latin in MusicBrainz; doing an artist search allows us to
+	// search by artist aliases, including Latin-character aliases
 	if scope := cmp.Or(cleanArtist, artist); scope != "" && cleanTrack != "" {
-		add("artist-scoped", searchRequest{query: phrase("recording", cleanTrack), limit: searchLimit}, scope)
+		add("artist-scoped", searchRequest{query: nearPhrase("recording", cleanTrack, titleSlop), limit: searchLimit}, scope)
 	}
 
 	// Last resort: hand the bare words to MusicBrainz's fuzzy parser.
@@ -121,14 +120,10 @@ func buildSearchQuery(params SearchParams) string {
 		queryParts = append(queryParts, phrase("isrc", params.ISRC))
 	}
 	if params.Track != "" {
-		queryParts = append(queryParts, phrase("recording", params.Track))
+		queryParts = append(queryParts, nearPhrase("recording", params.Track, titleSlop))
 	}
-	if params.Artist != "" {
-		// artistname holds each artist's canonical name; artist holds the
-		// rendered credit line. Foreign artists often have non-Latin canonical
-		// names, so searching by both is more reliable.
-		queryParts = append(queryParts, fmt.Sprintf("(%s OR %s)",
-			phrase("artistname", params.Artist), phrase("artist", params.Artist)))
+	if clause := artistClause(params.Artists); clause != "" {
+		queryParts = append(queryParts, clause)
 	}
 	if params.Release != "" {
 		queryParts = append(queryParts, phrase("release", params.Release))
@@ -145,12 +140,38 @@ func phrase(field, value string) string {
 	return fmt.Sprintf(`%s:"%s"`, field, escapeLucene(value))
 }
 
+// titleSlop is how many positions a title may shift and still match; MusicBrainz
+// lets us query with a bitta slop.
+const titleSlop = 3
+
+// nearPhrase is phrase with room for the words to move.
+func nearPhrase(field, value string, slop int) string {
+	return fmt.Sprintf(`%s~%d`, phrase(field, value), slop)
+}
+
+// artistClause adds a search clause for each individual artist, plus also all of
+// the artists together, comma-separated.
+func artistClause(artists []string) string {
+	var terms []string
+	seen := map[string]bool{}
+	for _, name := range append(slices.Clone(artists), strings.Join(artists, ", ")) {
+		if name = strings.TrimSpace(name); name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		terms = append(terms, phrase("artistname", name), phrase("artist", name))
+	}
+	if len(terms) == 0 {
+		return ""
+	}
+	return "(" + strings.Join(terms, " OR ") + ")"
+}
+
 // luceneSpecial are the characters that carry meaning to the query parser.
 const luceneSpecial = `+-&|!(){}[]^"~*?:\/`
 
 // freeText strips query syntax rather than escaping it, for the dismax tier
-// where the input is meant to read as plain words. Escaping there would leave
-// backslashes in the text being matched against.
+// where the input is meant to read as plain words.
 func freeText(s string) string {
 	return strings.Map(func(r rune) rune {
 		if strings.ContainsRune(luceneSpecial, r) {
@@ -160,13 +181,30 @@ func freeText(s string) string {
 	}, s)
 }
 
-// primaryArtist renders the incoming artist credit as a single string.
-func primaryArtist(track models.Track) string {
+// artistNames returns the credited names separately, for the tiers that ask
+// after each of them rather than the line they were rendered into.
+func artistNames(track models.Track) []string {
 	names := make([]string, 0, len(track.Artist))
 	for _, a := range track.Artist {
 		if name := strings.TrimSpace(a.Name); name != "" {
 			names = append(names, name)
 		}
 	}
-	return strings.Join(names, ", ")
+	return names
+}
+
+// cleanNames puts artist names through the cleaner individually.
+func (s *Service) cleanNames(names []string) []string {
+	cleaned := make([]string, 0, len(names))
+	for _, name := range names {
+		if clean, _ := s.cleaner.CleanArtist(name); clean != "" {
+			cleaned = append(cleaned, clean)
+		}
+	}
+	return cleaned
+}
+
+// primaryArtist renders the incoming artist credit as a single string.
+func primaryArtist(track models.Track) string {
+	return strings.Join(artistNames(track), ", ")
 }
