@@ -31,6 +31,7 @@
 {"name":"'Till I Collapse","artist":"Eminem","album":"The Eminem Show","duration_ms":297786,"note":"leading apostrophe","expect_recording_title":"'Till I Collapse","expect_release_title":"The Eminem Show"}
 
 {"name":"The Four Seasons, Violin Concerto in E Major, RV 269 \"Spring\": I. Allegro","artist":"Antonio Vivaldi","album":"Vivaldi: The Four Seasons","duration_ms":205000,"note":"classical, long structured title"}
+{"name":"Different Trains: America—Before the war","artist":"Steve Reich; Kronos Quartet","album":"Different Trains / Electric Counterpoint","duration_ms":538906,"note":"classical: MusicBrainz numbers the movement the service does not, and files the recording under the quartet rather than the composer leading the credit","expect_recording_mbid":"6583cb97-997e-4436-a915-7c2b5b9479f0","expect_release_title":"Different Trains / Electric Counterpoint"}
 
 {"name":"asdfgh","artist":"qwerty","album":"zxcvbn","note":"nonsense","expect_no_match":true}
 {"name":"","artist":"","album":"","note":"empty input","expect_no_match":true}
