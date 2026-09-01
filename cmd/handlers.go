@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/spf13/viper"
@@ -235,11 +237,16 @@ func apiMusicBrainzSearch(mbService *musicbrainz.Service) http.HandlerFunc {
 
 		params := musicbrainz.SearchParams{
 			Track:   r.URL.Query().Get("track"),
-			Artist:  r.URL.Query().Get("artist"),
 			Release: r.URL.Query().Get("release"),
 		}
+		// Repeat the parameter to credit more than one artist.
+		for _, artist := range r.URL.Query()["artist"] {
+			if artist = strings.TrimSpace(artist); artist != "" {
+				params.Artists = append(params.Artists, artist)
+			}
+		}
 
-		if params.Track == "" && params.Artist == "" && params.Release == "" {
+		if params.Track == "" && len(params.Artists) == 0 && params.Release == "" {
 			jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "At least one query parameter (track, artist, release) is required"})
 			return
 		}
@@ -577,7 +584,9 @@ func hydrateAndSubmitListens(database *db.DB, atprotoService *atprotoauth.AuthSe
 		track := saved.track
 
 		if mbService != nil && track.RecordingMBID == nil {
-			hydratedTrack, err := musicbrainz.HydrateTrack(mbService, track)
+			hydrateCtx := musicbrainz.WithEventContext(ctx,
+				slog.Int64("user_id", userID), slog.String("play_source", "import"))
+			hydratedTrack, err := mbService.HydrateTrack(hydrateCtx, track)
 			if err != nil {
 				log.Printf("apiSubmitListensHandler: Could not hydrate track with MusicBrainz for user %d: %v (continuing with original data)", userID, err)
 			} else if hydratedTrack != nil {
