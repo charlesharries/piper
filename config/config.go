@@ -29,6 +29,9 @@ func Load() {
 	viper.SetDefault("enable_lastfm", true)
 	viper.SetDefault("enable_applemusic", true)
 
+	viper.SetDefault("listenbrainz.token", "")
+	viper.SetDefault("app.submission_agent", "") // i.e. user-agent
+
 	// Apple Music defaults
 	viper.SetDefault("applemusic.team_id", "")
 	viper.SetDefault("applemusic.key_id", "")
@@ -45,6 +48,8 @@ func Load() {
 	_ = viper.BindEnv("applemusic.team_id", "APPLE_MUSIC_TEAM_ID")
 	_ = viper.BindEnv("applemusic.key_id", "APPLE_MUSIC_KEY_ID")
 	_ = viper.BindEnv("applemusic.private_key_path", "APPLE_MUSIC_PRIVATE_KEY_PATH")
+	_ = viper.BindEnv("listenbrainz.token", "LISTENBRAINZ_TOKEN")
+	_ = viper.BindEnv("app.submission_agent", "SUBMISSION_AGENT")
 
 	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 
