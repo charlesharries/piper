@@ -66,9 +66,9 @@ func buildBrowseReleasesEndpoint(releaseGroupID string) string {
 	q.Set("release-group", releaseGroupID)
 	q.Set("fmt", "json")
 	q.Set("limit", strconv.Itoa(browseReleasesLimit))
-	// The browse response omits release groups by default, and scoreRelease
-	// reads the group's title and type.
-	q.Set("inc", "release-groups")
+	// The browse response omits both by default, and scoreRelease reads the
+	// group's title and type and the media's format. Neither costs a request.
+	q.Set("inc", "release-groups+media")
 	return "https://musicbrainz.org/ws/2/release?" + q.Encode()
 }
 

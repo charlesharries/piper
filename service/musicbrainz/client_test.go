@@ -41,7 +41,7 @@ func TestBuildSearchEndpoint(t *testing.T) {
 
 func TestBuildRecordingEndpoint(t *testing.T) {
 	got := buildRecordingEndpoint("b1a9c0e9-d987-4042-ae91-78d6a3267d69")
-	want := "https://musicbrainz.org/ws/2/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69?fmt=json&inc=releases+release-groups+artist-credits+isrcs"
+	want := "https://musicbrainz.org/ws/2/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69?fmt=json&inc=releases+release-groups+artist-credits+isrcs+media"
 	if got != want {
 		t.Errorf("buildRecordingEndpoint() = %v, want %v", got, want)
 	}

@@ -18,7 +18,13 @@ const (
 	releaseWeightAlbumType = 0.75
 	releaseWeightCountry   = 0.25
 	releaseWeightArt       = 1.0
+	releaseWeightFormat    = 0.75
 )
+
+// Some releases have heaps of different media versions (cassette, cd, vinyl, etc), but we want the
+// CD or vinyl because its cover art is going to match what's expected.
+var sleeveFormats = []string{"cd", "vinyl", "digital media", "sacd", "dvd", "blu ray", "lp", "shm"}
+var insertFormats = []string{"cassette", "8 track", "reel to reel", "minidisc", "microcassette"}
 
 // releaseSecondaryPenalty is applied to compilations, live albums, soundtracks
 // and remix albums, and waived when the album name matches, so that someone
@@ -84,6 +90,10 @@ func scoreRelease(in matchInput, r Release, trackTitle string, artOwners map[str
 		card.add("country", country, releaseWeightCountry)
 	}
 
+	if format, known := formatScore(r.Media); known {
+		card.add("format", format, releaseWeightFormat)
+	}
+
 	if len(artOwners) > 0 {
 		art := 0.0
 		if artOwners[r.ID] {
@@ -112,6 +122,40 @@ func scoreRelease(in matchInput, r Release, trackTitle string, artOwners map[str
 	}
 
 	return card.score(), card.signals
+}
+
+// formatScore rates a pressing on whether its artwork is likely to be the
+// album cover as it is generally known, reporting false when MusicBrainz did
+// not say what the carrier was.
+func formatScore(media []Medium) (float64, bool) {
+	score, known := 0.0, false
+	for _, m := range media {
+		format := normalize(m.Format)
+		if format == "" {
+			continue
+		}
+		known = true
+		score = max(score, carrierScore(format))
+	}
+	return score, known
+}
+
+// carrierScore rates one carrier. The names MusicBrainz uses are generic, e.g.
+// "12" vinyl", "Bonus cassette", so match against substrings.
+func carrierScore(format string) float64 {
+	for _, insert := range insertFormats {
+		if strings.Contains(format, insert) {
+			return 0
+		}
+	}
+	for _, sleeve := range sleeveFormats {
+		if strings.Contains(format, sleeve) {
+			return 1
+		}
+	}
+	// Something unusual -- a shellac pressing, a USB stick. Neither what we want
+	// nor what we're avoiding.
+	return 0.5
 }
 
 // bestRelease picks the release to attribute a play to, and reports what it

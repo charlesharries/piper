@@ -114,6 +114,8 @@ Each 307-redirects to the image, or 404s when that release has no cover. `record
 
 Artwork is uploaded per pressing and most pressings have none, so which release piper picks decides whether that URL works. Release selection therefore scores artwork availability alongside the metadata signals (see [`service/musicbrainz/coverart.go`](./service/musicbrainz/coverart.go)) and prefers a pressing the archive holds a cover for, provided it is an equally good answer for the album. Getting the right album still wins over getting a cover.
 
+A popular album has dozens of pressings that agree on every other signal, so the packaging breaks ties: prefer CD and vinyl slevees to cassette J-card. Piper reads the format from the `media` the release lookup and the release-group browse already return, so preferring the sleeve costs no extra request.
+
 #### hydration events
 
 Matching fails quietly — a play just ends up carrying the wrong MBID — so the logs are the only record of what was decided. Hydrating a play writes exactly one JSON line to stderr, `msg: "track_hydrated"`, carrying the play as the service reported it (`in`), what it was attributed to (`out`), the score and its per-signal breakdown (`sig`), what ListenBrainz said and whether it was believed (`lb`), which tier won (`search`), the artwork pass (`art`) and the request count (`cost`). Nothing is logged mid-lookup, so there are no lines to stitch together.

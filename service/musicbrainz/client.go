@@ -61,6 +61,7 @@ type Track struct {
 // they name it `track` where a release lookup would say `tracks`.
 type Medium struct {
 	Tracks []Track `json:"track,omitempty"`
+	Format string  `json:"format,omitempty"` // the physical media -- prefer cds
 }
 
 type Release struct {
@@ -240,7 +241,7 @@ func buildArtistEndpoint(name string) string {
 // search it honours `inc`, so it is the way to a full release list.
 func buildRecordingEndpoint(mbid string) string {
 	return fmt.Sprintf(
-		"https://musicbrainz.org/ws/2/recording/%s?fmt=json&inc=releases+release-groups+artist-credits+isrcs",
+		"https://musicbrainz.org/ws/2/recording/%s?fmt=json&inc=releases+release-groups+artist-credits+isrcs+media",
 		url.PathEscape(mbid),
 	)
 }

@@ -251,3 +251,62 @@ func TestSearchAlbum(t *testing.T) {
 		})
 	}
 }
+
+// pressedOn gives a release its physical carrier.
+func pressedOn(rel Release, format string) Release {
+	rel.Media = []Medium{{Format: format}}
+	return rel
+}
+
+// Toto IV has like 50 releases, but we want the CD or vinyl even if a
+// different media has a more precise date on it.
+func TestBestReleasePrefersSleeveOverInsertFormat(t *testing.T) {
+	in := newMatchInput(models.Track{Name: "Africa", Album: "Toto IV"})
+
+	cassette := pressedOn(release("Toto IV", "Toto IV", "1982-04-08", "US"), "Cassette")
+	vinyl := pressedOn(release("Toto IV", "Toto IV", "1982", "US"), `12" Vinyl`)
+
+	got, score := bestRelease(in, []Release{cassette, vinyl}, "Africa", nil)
+	if got == nil || got.ID != vinyl.ID {
+		t.Fatalf("chose %v (%.3f), want the vinyl pressing", got, score)
+	}
+}
+
+// Most releases piper scores arrive with no media at all, and an unknown
+// carrier must not be treated as a bad one.
+func TestBestReleaseIgnoresUnknownFormat(t *testing.T) {
+	in := newMatchInput(models.Track{Name: "Africa", Album: "Toto IV"})
+
+	unknown := release("Toto IV", "Toto IV", "1982-04-08", "US")
+	cassette := pressedOn(release("Toto IV", "Toto IV", "1982-04-08", "US"), "Cassette")
+
+	got, score := bestRelease(in, []Release{cassette, unknown}, "Africa", nil)
+	if got == nil || got.ID != unknown.ID {
+		t.Fatalf("chose %v (%.3f), want the pressing with no stated carrier", got, score)
+	}
+}
+
+func TestCarrierScore(t *testing.T) {
+	tests := []struct {
+		format string
+		want   float64
+	}{
+		{format: `12" vinyl`, want: 1},
+		{format: "cd", want: 1},
+		{format: "blu spec cd", want: 1},
+		{format: "hybrid sacd cd layer", want: 1},
+		{format: "digital media", want: 1},
+		{format: "cassette", want: 0},
+		{format: "reel to reel", want: 0},
+		{format: "minidisc", want: 0},
+		{format: "shellac", want: 0.5},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.format, func(t *testing.T) {
+			if got := carrierScore(tt.format); got != tt.want {
+				t.Errorf("carrierScore(%q) = %v, want %v", tt.format, got, tt.want)
+			}
+		})
+	}
+}
