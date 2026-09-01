@@ -29,9 +29,27 @@ const (
 // the play did not ask for, e.g. matching "Dreams" against "Dreams (outtake)".
 const qualifierPenalty = 0.25
 
-// durationConflictPenalty is subtracted when the play and the candidate both
-// carry a length and disagree by more than durationScore tolerates.
+// durationConflictPenalty is the most that is subtracted when the play and the
+// candidate both carry a length and disagree by more than durationScore
+// tolerates.
 const durationConflictPenalty = 0.25
+
+// durationTolerance is the disagreement durationScore still scores above zero.
+// Songs within 20s of each other may be a valid match
+const durationTolerance = 20 * 1000
+
+// durationConflictRamp is how far past durationTolerance the lengths must
+// disagree before the conflict penalty is felt in full.
+const durationConflictRamp = 40 * 1000
+
+// minTitleAgreement is the title agreement below which a candidate is not
+// trusted to be the same song at all, whatever else lines up. Title is the
+// track's identity, not one vote among several: without this, a candidate
+// sharing only an artist and a runtime -- which any two tracks on an album may
+// -- outscores the recording actually played. Correct matches sit at 1.00 with
+// the exception of classical, where MusicBrainz numbers movements the services
+// do not; the lowest in the golden set is 0.51, so this leaves room beneath it.
+const minTitleAgreement = 0.45
 
 // uncorroboratedPenalty is subtracted when title and artist are the only
 // signals available -- this could be basically anything as far as we know!
@@ -89,11 +107,13 @@ func scoreRecording(in matchInput, rec Recording) (float64, signals) {
 
 	// corroborated records whether anything beyond title and artist had a view.
 	var corroborated, durationConflict bool
+	var durationDelta int64
 
 	if in.durationMs > 0 && rec.Length > 0 {
 		duration := durationScore(in.durationMs, int64(rec.Length))
 		card.add("duration", duration, weightDuration)
 		durationConflict = duration == 0
+		durationDelta = difference(in.durationMs, int64(rec.Length))
 		corroborated = true
 	}
 	if in.album.full != "" && len(rec.Releases) > 0 {
@@ -114,13 +134,52 @@ func scoreRecording(in matchInput, rec Recording) (float64, signals) {
 		card.penalise("video", qualifierPenalty)
 	}
 	if durationConflict {
-		card.penalise("conflict", durationConflictPenalty)
+		if conflict := durationConflictAmount(durationDelta); conflict > 0 {
+			card.penalise("conflict", conflict)
+		}
 	}
 	if !corroborated {
 		card.penalise("uncorroborated", uncorroboratedPenalty)
 	}
 
-	return math.Max(0, card.score()), card.signals
+	// confidence is a final multiplier based on the title -- if everything but
+	// the title matches, but the title is totally wrong, we could still clear
+	// the 0.62 confidence threshold. Multiplying the whole score by how well
+	// the title matches avoids these scenarios. Scenarii?
+	confidence := titleConfidence(title)
+	if confidence < 1 {
+		card.signals = append(card.signals, signal{"title_floor", confidence})
+	}
+
+	return math.Max(0, card.score()*confidence), card.signals
+}
+
+// durationConflictAmount grades the penalty for two lengths that disagree by
+// more than durationScore tolerates, reporting zero for a gap still inside it.
+func durationConflictAmount(deltaMs int64) float64 {
+	over := deltaMs - durationTolerance
+	if over <= 0 {
+		return 0
+	}
+	return durationConflictPenalty * math.Min(1, float64(over)/durationConflictRamp)
+}
+
+// titleConfidence is the factor a score is scaled by for how far its title fell
+// short of minTitleAgreement: 1 at or above it, tapering to 0 for a title that
+// agrees with nothing the play named.
+func titleConfidence(title float64) float64 {
+	if title >= minTitleAgreement {
+		return 1
+	}
+	return title / minTitleAgreement
+}
+
+// difference returns the absolute gap between two lengths in milliseconds.
+func difference(a, b int64) int64 {
+	if a > b {
+		return a - b
+	}
+	return b - a
 }
 
 // trackTitles returns the names the candidate's releases list it under: where a
@@ -232,10 +291,7 @@ func (in matchInput) artistScore(credits []ArtistCredit) float64 {
 // this the strongest signal for separating candidates MusicBrainz returns at
 // identical query scores.
 func durationScore(a, b int64) float64 {
-	delta := a - b
-	if delta < 0 {
-		delta = -delta
-	}
+	delta := difference(a, b)
 	switch {
 	case delta <= 2000:
 		return 1.0
@@ -243,7 +299,7 @@ func durationScore(a, b int64) float64 {
 		return 0.8
 	case delta <= 10000:
 		return 0.4
-	case delta <= 20000:
+	case delta <= durationTolerance:
 		return 0.1
 	default:
 		return 0

@@ -405,3 +405,76 @@ func TestTitleScoreLeavesSlashesInRealNamesAlone(t *testing.T) {
 		t.Errorf("whole-title match = %.2f, want the full string to still win", score)
 	}
 }
+
+// The same length disagreement still has to do its job where the album doesn't match.
+func TestScoreRecordingStillSeparatesLiveTake(t *testing.T) {
+	in := newMatchInput(models.Track{
+		Name:       "Whole Lotta Love",
+		Album:      "Led Zeppelin II",
+		DurationMs: 333000,
+		Artist:     []models.Artist{{Name: "Led Zeppelin"}},
+	})
+	studio, _ := scoreRecording(in, recording("Whole Lotta Love", "Led Zeppelin", 334000,
+		release("Led Zeppelin II", "Led Zeppelin II", "1969", "US")))
+	live, _ := scoreRecording(in, recording("Whole Lotta Love", "Led Zeppelin", 1400000,
+		release("How the West Was Won", "How the West Was Won", "2003", "US")))
+
+	if live >= studio {
+		t.Errorf("live take scored %.3f, must lose to the studio recording at %.3f", live, studio)
+	}
+	if live >= minConfidence {
+		t.Errorf("live take scored %.3f, must not be publishable for a studio play", live)
+	}
+}
+
+// The conflict penalty grades with the size of the disagreement rather than
+// switching on at the tolerance.
+func TestDurationConflictAmountGrades(t *testing.T) {
+	justOver := durationConflictAmount(durationTolerance + 1)
+	wayOver := durationConflictAmount(durationTolerance + durationConflictRamp)
+
+	if justOver <= 0 || justOver >= 0.01 {
+		t.Errorf("a millisecond past tolerance = %v, want a hair above zero", justOver)
+	}
+	if wayOver != durationConflictPenalty {
+		t.Errorf("a full ramp past tolerance = %v, want %v", wayOver, durationConflictPenalty)
+	}
+	if amount := durationConflictAmount(durationTolerance); amount != 0 {
+		t.Errorf("a gap inside tolerance = %v, want no penalty at all", amount)
+	}
+}
+
+// Title is the track's identity, so use it as a final multiplier for confidence.
+func TestScoreRecordingRequiresTitleAgreement(t *testing.T) {
+	in := newMatchInput(models.Track{
+		Name:       "Longhope",
+		Album:      "Longhope",
+		DurationMs: 211000,
+		Artist:     []models.Artist{{Name: "Hinako Omori"}},
+	})
+	rel := release("Auraelia", "Auraelia", "2025", "GB")
+
+	right, _ := scoreRecording(in, recording("Longhope", "Hinako Omori", 211000, rel))
+	if right < minConfidence {
+		t.Errorf("the right title scored %.3f, want at least %v", right, minConfidence)
+	}
+
+	for _, title := range []string{"Memory Grooves", "Heartplant"} {
+		got, reasons := scoreRecording(in, recording(title, "Hinako Omori", 211000, rel))
+		if got >= minConfidence {
+			t.Errorf("%q scored %.3f on artist and length alone, want below %v [%s]",
+				title, got, minConfidence, reasons)
+		}
+	}
+}
+
+// Some titles legitimately disagree, e.g. in classical, so the
+// title confidence floor has to sit below them.
+func TestTitleConfidenceSparesClassicalTitles(t *testing.T) {
+	if got := titleConfidence(0.51); got != 1 {
+		t.Errorf("titleConfidence(0.51) = %v, want 1: the golden set's lowest correct title", got)
+	}
+	if got := titleConfidence(0); got != 0 {
+		t.Errorf("titleConfidence(0) = %v, want 0", got)
+	}
+}
