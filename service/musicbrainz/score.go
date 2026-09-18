@@ -25,10 +25,6 @@ const (
 	weightMBScore  = 0.25
 )
 
-// qualifierPenalty is subtracted when a candidate carries a variant qualifier
-// the play did not ask for, e.g. matching "Dreams" against "Dreams (outtake)".
-const qualifierPenalty = 0.25
-
 // durationConflictPenalty is the most that is subtracted when the play and the
 // candidate both carry a length and disagree by more than durationScore
 // tolerates.
@@ -54,10 +50,6 @@ const minTitleAgreement = 0.45
 // uncorroboratedPenalty is subtracted when title and artist are the only
 // signals available -- this could be basically anything as far as we know!
 const uncorroboratedPenalty = 0.4
-
-// qualifierAgreement is how closely two qualifiers must match before a
-// candidate's counts as the one the play asked for.
-const qualifierAgreement = 0.8
 
 // matchInput is the normalized view of an incoming play, computed once and
 // reused across every candidate.
@@ -101,7 +93,7 @@ func scoreRecording(in matchInput, rec Recording) (float64, signals) {
 
 	var card scorecard
 
-	title, unmatchedVariant := in.titleScore(rec)
+	title := in.titleScore(rec)
 	card.add("title", title, weightTitle)
 	card.add("artist", in.artistScore(rec.ArtistCredit), weightArtist)
 
@@ -127,12 +119,6 @@ func scoreRecording(in matchInput, rec Recording) (float64, signals) {
 		card.add("mb", float64(rec.Score)/100, weightMBScore)
 	}
 
-	if unmatchedVariant {
-		card.penalise("variant", qualifierPenalty)
-	}
-	if rec.Video {
-		card.penalise("video", qualifierPenalty)
-	}
 	if durationConflict {
 		if conflict := durationConflictAmount(durationDelta); conflict > 0 {
 			card.penalise("conflict", conflict)
@@ -182,9 +168,7 @@ func difference(a, b int64) int64 {
 	return b - a
 }
 
-// trackTitles returns the names the candidate's releases list it under: where a
-// recording is titled after every song on a combined track, these name the one
-// song a service reports.
+// trackTitles returns the names the candidate's releases list it under.
 func (rec Recording) trackTitles() []string {
 	var titles []string
 	seen := map[string]bool{rec.Title: true}
@@ -203,25 +187,15 @@ func (rec Recording) trackTitles() []string {
 }
 
 // titleScore compares the incoming title against every name the candidate goes
-// by, reporting whether the name that matched carries an unasked-for qualifier.
-func (in matchInput) titleScore(rec Recording) (score float64, unmatchedVariant bool) {
-	score, unmatchedVariant = in.compareTitle(rec.Title)
+// by: where a recording is titled after every song on a combined track, the
+// name one of its releases lists it under is the one a service reports.
+func (in matchInput) titleScore(rec Recording) float64 {
+	score := in.title.agrees(readingOf(rec.Title))
 
 	for _, title := range rec.trackTitles() {
-		if trackScore, trackVariant := in.compareTitle(title); trackScore > score {
-			score, unmatchedVariant = trackScore, trackVariant
-		}
+		score = max(score, in.title.agrees(readingOf(title)))
 	}
-	return score, unmatchedVariant
-}
-
-// compareTitle rates one title against the incoming play, reporting whether it
-// carries a variant qualifier the play never asked for.
-func (in matchInput) compareTitle(title string) (float64, bool) {
-	candidate := readingOf(title)
-	unmatched := isVariantQualifier(candidate.qualifier) &&
-		similarity(in.title.qualifier, candidate.qualifier) < qualifierAgreement
-	return in.title.agrees(candidate), unmatched
+	return score
 }
 
 // compareAlbum matches a release title against the incoming album name.

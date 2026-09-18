@@ -83,7 +83,6 @@ type Recording struct {
 	// matched the query -- not whether it is right!
 	Score        int            `json:"score,omitempty"`
 	Length       int            `json:"length,omitempty"` // milliseconds
-	Video        bool           `json:"video,omitempty"`
 	ISRCs        []string       `json:"isrcs,omitempty"`
 	ArtistCredit []ArtistCredit `json:"artist-credit,omitempty"`
 	Releases     []Release      `json:"releases,omitempty"`

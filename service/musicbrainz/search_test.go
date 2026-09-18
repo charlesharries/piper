@@ -182,7 +182,7 @@ func TestSearchTiers(t *testing.T) {
 	t.Run("title searching includes a bit of slop in case we've got a movement in a larger piece", func(t *testing.T) {
 		in := newMatchInput(track("Different Trains: America—Before the war", "Kronos Quartet", "", ""))
 		rec := Recording{Title: "Different Trains: I. America - Before the War"}
-		if score, _ := in.titleScore(rec); score < 0.9 {
+		if score := in.titleScore(rec); score < 0.9 {
 			t.Fatalf("scoring rates the numbered title %0.2f, so retrieval is what must reach it", score)
 		}
 		for _, tier := range s.searchTiers(track("Different Trains: America—Before the war", "Kronos Quartet", "", "")) {

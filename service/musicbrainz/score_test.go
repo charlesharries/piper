@@ -354,25 +354,8 @@ func TestTitleScoreMatchesTheNameItsReleaseListsItUnder(t *testing.T) {
 	rec := recording("Stability / Coney Island (alternate version)", "Death Cab for Cutie", 741600,
 		listedAs(release("The Stability EP", "The Stability E.P.", "2002-02-19", "XW"), "Stability"))
 
-	score, variant := in.titleScore(rec)
-	if score < 0.99 {
+	if score := in.titleScore(rec); score < 0.99 {
 		t.Errorf("title score = %.2f, want a full match on the name the EP lists it under", score)
-	}
-	// "(alternate version)" qualifies Coney Island, not Stability.
-	if variant {
-		t.Error("penalised for a qualifier belonging to the other song on the track")
-	}
-}
-
-// A qualifier on the name that matched must still count.
-func TestTitleScoreKeepsVariantOnTheMatchedName(t *testing.T) {
-	in := newMatchInput(models.Track{Name: "Stability"})
-
-	rec := recording("Stability / Coney Island", "Death Cab for Cutie", 741600,
-		listedAs(release("A Live One", "A Live One", "2003-01-01", "US"), "Stability (live)"))
-
-	if _, variant := in.titleScore(rec); !variant {
-		t.Error("expected the live qualifier on the matched name to be penalised")
 	}
 }
 
@@ -386,8 +369,7 @@ func TestTitleScoreDoesNotMatchASongInsideAMix(t *testing.T) {
 	rec := recording(tracklist, "Various Artists", 0,
 		listedAs(release("Modern Yacht Rock", "Modern Yacht Rock", "2019-01-01", "US"), tracklist))
 
-	score, _ := in.titleScore(rec)
-	if score > 0.5 {
+	if score := in.titleScore(rec); score > 0.5 {
 		t.Errorf("title score = %.2f, want a mix to be scored whole rather than per song", score)
 	}
 }
@@ -400,8 +382,7 @@ func TestTitleScoreLeavesSlashesInRealNamesAlone(t *testing.T) {
 	rec := recording(title, "The Beatles", 0,
 		listedAs(release("Sgt. Pepper's", "Sgt. Pepper's", "1967-06-01", "GB"), title))
 
-	score, _ := in.titleScore(rec)
-	if score < 0.99 {
+	if score := in.titleScore(rec); score < 0.99 {
 		t.Errorf("whole-title match = %.2f, want the full string to still win", score)
 	}
 }
