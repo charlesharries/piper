@@ -5,6 +5,7 @@ jwk*.json
 **.bak
 .idea
 AM_AUTHKEY.p8
+AuthKey_*.p8
 .DS_Store
 node_modules/
 
