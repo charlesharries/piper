@@ -195,6 +195,14 @@ func (db *DB) Initialize() error {
 		return err
 	}
 
+	// source_id holds the provider's own identity for a play. Providers whose
+	// history carries no timestamps match on it rather than on url, which can
+	// need an extra API round trip to resolve.
+	_, err = db.Exec(`ALTER TABLE tracks ADD COLUMN source_id TEXT`)
+	if err != nil && !strings.Contains(err.Error(), "duplicate column") {
+		return err
+	}
+
 	return db.backfillTrackSources()
 }
 
@@ -474,11 +482,11 @@ func (db *DB) SaveTrack(userID int64, source TrackSource, track *models.Track) (
 	var trackID int64
 
 	err := db.QueryRow(`
-	INSERT INTO tracks (user_id, name, recording_mbid, artist, album, release_mbid, url, timestamp, duration_ms, progress_ms, service_base_url, isrc, has_stamped, source)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	INSERT INTO tracks (user_id, name, recording_mbid, artist, album, release_mbid, url, timestamp, duration_ms, progress_ms, service_base_url, isrc, has_stamped, source, source_id)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	RETURNING id`,
 		userID, track.Name, track.RecordingMBID, artistString, track.Album, track.ReleaseMBID, track.URL, track.Timestamp,
-		track.DurationMs, track.ProgressMs, track.ServiceBaseUrl, track.ISRC, track.HasStamped, source).Scan(&trackID)
+		track.DurationMs, track.ProgressMs, track.ServiceBaseUrl, track.ISRC, track.HasStamped, source, track.SourceID).Scan(&trackID)
 
 	return trackID, err
 }
@@ -548,7 +556,7 @@ func (db *DB) UpdateTrack(trackID int64, source TrackSource, track *models.Track
 
 func (db *DB) GetRecentTracks(userID int64, limit int) ([]*models.Track, error) {
 	rows, err := db.Query(`
-    SELECT id, name, recording_mbid, artist, album, release_mbid, url, timestamp, duration_ms, progress_ms, service_base_url, isrc, has_stamped
+    SELECT id, name, recording_mbid, artist, album, release_mbid, url, timestamp, duration_ms, progress_ms, service_base_url, isrc, has_stamped, COALESCE(source_id, '')
     FROM tracks
     WHERE user_id = ?
     ORDER BY timestamp DESC
@@ -603,6 +611,7 @@ func scanTrack(row rowScanner) (*models.Track, error) {
 		&track.ServiceBaseUrl,
 		&track.ISRC,
 		&track.HasStamped,
+		&track.SourceID,
 	); err != nil {
 		return nil, err
 	}
@@ -618,13 +627,48 @@ func scanTrack(row rowScanner) (*models.Track, error) {
 	return &track, nil
 }
 
+// GetRecentTracksForService returns the most recent tracks stored for one
+// source, newest first. Sync cursors compare an upstream window against this
+// history, so they need more than just the newest row.
+func (db *DB) GetRecentTracksForService(userID int64, source TrackSource, limit int) ([]*models.Track, error) {
+	if !source.IsValid() {
+		return nil, fmt.Errorf("invalid source %q", source)
+	}
+
+	rows, err := db.Query(`
+    SELECT id, name, recording_mbid, artist, album, release_mbid, url, timestamp, duration_ms, progress_ms, service_base_url, isrc, has_stamped, COALESCE(source_id, '')
+    FROM tracks
+    WHERE user_id = ? AND source = ?
+    ORDER BY timestamp DESC
+    LIMIT ?`, userID, source, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query recent %s tracks for user %d: %w", source, userID, err)
+	}
+	defer func(rows *sql.Rows) {
+		if err := rows.Close(); err != nil {
+			log.Println(err)
+		}
+	}(rows)
+
+	var tracks []*models.Track
+	for rows.Next() {
+		track, err := scanTrack(rows)
+		if err != nil {
+			return nil, err
+		}
+		tracks = append(tracks, track)
+	}
+
+	return tracks, rows.Err()
+}
+
 func (db *DB) GetLatestTrackForService(userID int64, source TrackSource) (*models.Track, error) {
 	if !source.IsValid() {
 		return nil, fmt.Errorf("invalid source %q", source)
 	}
 
 	track, err := scanTrack(db.QueryRow(`
-    SELECT id, name, recording_mbid, artist, album, release_mbid, url, timestamp, duration_ms, progress_ms, service_base_url, isrc, has_stamped
+    SELECT id, name, recording_mbid, artist, album, release_mbid, url, timestamp, duration_ms, progress_ms, service_base_url, isrc, has_stamped, COALESCE(source_id, '')
     FROM tracks
     WHERE user_id = ? AND source = ?
     ORDER BY timestamp DESC

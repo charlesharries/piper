@@ -440,6 +440,7 @@ func HydrateTrack(mb *Service, track models.Track) (*models.Track, error) {
 		PlayID:         track.PlayID,
 		Name:           track.Name,
 		URL:            track.URL,
+		SourceID:       track.SourceID,
 		ServiceBaseUrl: track.ServiceBaseUrl,
 		RecordingMBID:  &firstResult.ID,
 		ISRC:           cmp.Or(track.ISRC, firstISRC),

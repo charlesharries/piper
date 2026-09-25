@@ -19,6 +19,10 @@ type Track struct {
 	ServiceBaseUrl string    `json:"serviceBaseUrl"`
 	ISRC           string    `json:"isrc"`
 	HasStamped     bool      `json:"hasStamped"`
+	// SourceID is the upstream service's own identity for this play, used to
+	// match a track against a provider's history. Internal to syncing, so it is
+	// not part of the JSON API.
+	SourceID string `json:"-"`
 }
 
 type Artist struct {
