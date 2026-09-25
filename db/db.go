@@ -20,6 +20,17 @@ type DB struct {
 	logger *log.Logger
 }
 
+// sqliteDSN adds the pragmas piper needs to survive concurrent access: WAL so
+// readers do not block the writer, and a busy timeout so a contended write
+// waits instead of failing outright. A path that already carries parameters is
+// left to specify its own.
+func sqliteDSN(dbPath string) string {
+	if strings.Contains(dbPath, "?") {
+		return dbPath
+	}
+	return dbPath + "?_journal_mode=WAL&_busy_timeout=5000"
+}
+
 func New(dbPath string) (*DB, error) {
 	dir := filepath.Dir(dbPath)
 	if dir != "." && dir != "/" {
@@ -30,10 +41,17 @@ func New(dbPath string) (*DB, error) {
 		}
 	}
 
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite3", sqliteDSN(dbPath))
 	if err != nil {
 		return nil, err
 	}
+
+	// SQLite allows a single writer. Without this the trackers and the HTTP
+	// handlers race each other and lose writes to SQLITE_BUSY, which for a
+	// tracker means a silently dropped play. One connection serialises them,
+	// and it also keeps ":memory:" databases from splitting into one database
+	// per connection.
+	db.SetMaxOpenConns(1)
 
 	// Test the connection
 	if err = db.Ping(); err != nil {
