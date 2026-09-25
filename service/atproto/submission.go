@@ -43,8 +43,17 @@ func SubmitPlayToPDS(ctx context.Context, did string, mostRecentAtProtoSessionID
 		return fmt.Errorf("failed to create play record for DID %s: %w", did, err)
 	}
 
-	log.Printf("Successfully submitted play to PDS for DID %s: %s - %s", did, track.Artist[0].Name, track.Name)
+	log.Printf("Successfully submitted play to PDS for DID %s: %s - %s", did, firstArtistName(track), track.Name)
 	return nil
+}
+
+// firstArtistName returns the primary artist's name, or a placeholder when the
+// track carries no artists.
+func firstArtistName(track *models.Track) string {
+	if track != nil && len(track.Artist) > 0 {
+		return track.Artist[0].Name
+	}
+	return "Unknown Artist"
 }
 
 // TrackToPlayRecord converts a models.Track to teal.FeedPlay

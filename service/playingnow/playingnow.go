@@ -55,8 +55,8 @@ func (p *Service) PublishPlayingNow(ctx context.Context, userID int64, track *mo
 		return fmt.Errorf("user not found user ID: %d", userID)
 	}
 
-	if user.ATProtoDID == nil {
-		p.logger.Printf("User %d has no ATProto DID, skipping playing now", userID)
+	if user.ATProtoDID == nil || user.MostRecentAtProtoSessionID == nil {
+		p.logger.Printf("User %d has no ATProto session, skipping playing now", userID)
 		return nil
 	}
 
@@ -104,7 +104,7 @@ func (p *Service) PublishPlayingNow(ctx context.Context, userID int64, track *mo
 		swapCid = swapRecord.Cid
 	}
 
-	p.logger.Printf("Publishing playing now status for user %d (DID: %s): %s - %s", userID, did, track.Artist[0].Name, track.Name)
+	p.logger.Printf("Publishing playing now status for user %d (DID: %s): %s - %s", userID, did, firstArtistName(track), track.Name)
 
 	// Create the record input
 	input := comatproto.RepoPutRecord_Input{
@@ -151,8 +151,8 @@ func (p *Service) ClearPlayingNow(ctx context.Context, userID int64) error {
 		return fmt.Errorf("user not found user ID: %d", userID)
 	}
 
-	if user.ATProtoDID == nil {
-		p.logger.Printf("User %d has no ATProto DID, skipping clear playing now", userID)
+	if user.ATProtoDID == nil || user.MostRecentAtProtoSessionID == nil {
+		p.logger.Printf("User %d has no ATProto session, skipping clear playing now", userID)
 		return nil
 	}
 
@@ -281,6 +281,15 @@ func (p *Service) trackToPlayView(track *models.Track) (*teal.FeedDefs_PlayView,
 	}
 
 	return playView, nil
+}
+
+// firstArtistName returns the primary artist's name, or a placeholder when the
+// track carries no artists.
+func firstArtistName(track *models.Track) string {
+	if track != nil && len(track.Artist) > 0 {
+		return track.Artist[0].Name
+	}
+	return "Unknown Artist"
 }
 
 // getStatusSwapRecord retrieves the current swap record (CID) for the actor status record.
