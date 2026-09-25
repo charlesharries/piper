@@ -311,3 +311,27 @@ func TestCursorsTimestampScopesToSource(t *testing.T) {
 		t.Fatalf("got %v want %v", got, want)
 	}
 }
+
+func TestNewAppliesConcurrencyPragmas(t *testing.T) {
+	database, err := New(t.TempDir() + "/pragma.db")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer database.Close()
+
+	var mode string
+	if err := database.QueryRow(`PRAGMA journal_mode`).Scan(&mode); err != nil {
+		t.Fatalf("reading journal_mode: %v", err)
+	}
+	if mode != "wal" {
+		t.Errorf("journal_mode = %q, want wal", mode)
+	}
+
+	var timeout int
+	if err := database.QueryRow(`PRAGMA busy_timeout`).Scan(&timeout); err != nil {
+		t.Fatalf("reading busy_timeout: %v", err)
+	}
+	if timeout != 5000 {
+		t.Errorf("busy_timeout = %d, want 5000", timeout)
+	}
+}

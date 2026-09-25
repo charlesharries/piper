@@ -11,10 +11,7 @@ type Track struct {
 	Artist        []Artist `json:"artist"`
 	Album         string   `json:"album"`
 	// analogous to "album"
-	ReleaseMBID *string `json:"releaseMBID,omitempty"`
-	// ReleaseDiscriminant preserves the edition the music service reported
-	// ("Super Deluxe", "2011 Remaster") when we resolve the play to the base
-	// release, which MusicBrainz holds under its plain title.
+	ReleaseMBID         *string   `json:"releaseMBID,omitempty"`
 	ReleaseDiscriminant string    `json:"releaseDiscriminant,omitempty"`
 	URL                 string    `json:"url"`
 	Timestamp           time.Time `json:"timestamp"`
@@ -23,6 +20,7 @@ type Track struct {
 	ServiceBaseUrl      string    `json:"serviceBaseUrl"`
 	ISRC                string    `json:"isrc"`
 	HasStamped          bool      `json:"hasStamped"`
+	SourceID            string    `json:"-"`
 }
 
 type Artist struct {

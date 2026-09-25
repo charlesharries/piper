@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -110,8 +111,8 @@ func newTestService(t *testing.T, testDB *db.DB, transport http.RoundTripper) *S
 
 // uploadedTrackJSON builds an Apple Music API response for an uploaded track (no URL).
 func uploadedTrackJSON(name, artist, album string) string {
+	// No id: uploaded tracks fall back to a metadata hash, as they do live.
 	track := map[string]any{
-		"id": "1",
 		"attributes": map[string]string{
 			"name":       name,
 			"artistName": artist,
@@ -119,6 +120,36 @@ func uploadedTrackJSON(name, artist, album string) string {
 		},
 	}
 	data, _ := json.Marshal(map[string]any{"data": []any{track}})
+	return string(data)
+}
+
+// resourceID is the Apple resource id recentTracksJSON gives a named track.
+func resourceID(name string) string {
+	return "ams." + name
+}
+
+// catalogURL is the share URL recentTracksJSON gives a named track.
+func catalogURL(name string) string {
+	return "https://music.apple.com/song/" + name
+}
+
+// recentTracksJSON builds an Apple Music recently-played response for catalog
+// tracks. Names are given newest-first, matching Apple's ordering.
+func recentTracksJSON(names ...string) string {
+	tracks := make([]any, 0, len(names))
+	for _, name := range names {
+		tracks = append(tracks, map[string]any{
+			"id": resourceID(name),
+			"attributes": map[string]any{
+				"name":             name,
+				"artistName":       name + " Artist",
+				"albumName":        name + " Album",
+				"url":              catalogURL(name),
+				"durationInMillis": 180000,
+			},
+		})
+	}
+	data, _ := json.Marshal(map[string]any{"data": tracks})
 	return string(data)
 }
 
@@ -147,6 +178,7 @@ func (env *processUserTestEnv) seedUploadedTrack(t *testing.T, name, artist, alb
 		Artist:         []models.Artist{{Name: artist}},
 		Album:          album,
 		URL:            hash,
+		SourceID:       hash,
 		ServiceBaseUrl: "music.apple.com",
 	})
 	if err != nil {
@@ -162,6 +194,42 @@ func (env *processUserTestEnv) trackCount(t *testing.T) int {
 		t.Fatalf("failed to get recent tracks: %v", err)
 	}
 	return len(tracks)
+}
+
+// seedCatalogTracks stores catalog tracks as existing history. Names are given
+// newest-first; timestamps are assigned so the stored order matches.
+func (env *processUserTestEnv) seedCatalogTracks(t *testing.T, newestFirst ...string) {
+	t.Helper()
+	base := time.Now().UTC().Add(-time.Duration(len(newestFirst)) * time.Hour)
+	for i := len(newestFirst) - 1; i >= 0; i-- {
+		name := newestFirst[i]
+		_, err := env.testDB.SaveTrack(env.user.ID, db.SourceAppleMusic, &models.Track{
+			Name:           name,
+			Artist:         []models.Artist{{Name: name + " Artist"}},
+			Album:          name + " Album",
+			URL:            catalogURL(name),
+			SourceID:       resourceID(name),
+			ServiceBaseUrl: "music.apple.com",
+			Timestamp:      base.Add(time.Duration(len(newestFirst)-i) * time.Minute),
+		})
+		if err != nil {
+			t.Fatalf("failed to seed track %q: %v", name, err)
+		}
+	}
+}
+
+// storedNames returns the stored track names for the test user, newest-first.
+func (env *processUserTestEnv) storedNames(t *testing.T) []string {
+	t.Helper()
+	tracks, err := env.testDB.GetRecentTracksForService(env.user.ID, db.SourceAppleMusic, 100)
+	if err != nil {
+		t.Fatalf("failed to read stored tracks: %v", err)
+	}
+	names := make([]string, len(tracks))
+	for i, track := range tracks {
+		names[i] = track.Name
+	}
+	return names
 }
 
 func TestProcessUserSkipsDuplicateUploadedTrack(t *testing.T) {
@@ -190,7 +258,7 @@ func TestProcessUserSavesDifferentUploadedTrack(t *testing.T) {
 	}
 }
 
-func TestGetCurrentAppleMusicTrackResolvesCatalogURL(t *testing.T) {
+func TestProcessUserResolvesCatalogURL(t *testing.T) {
 	testDB := newTestDB(t)
 	var paths []string
 	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -227,72 +295,463 @@ func TestGetCurrentAppleMusicTrackResolvesCatalogURL(t *testing.T) {
 	svc := newTestService(t, testDB, transport)
 	user := createTestUser(t, testDB)
 
-	track, err := svc.GetCurrentAppleMusicTrack(context.Background(), user)
-	if err != nil {
-		t.Fatalf("GetCurrentAppleMusicTrack returned error: %v", err)
+	if err := svc.ProcessUser(context.Background(), user); err != nil {
+		t.Fatalf("ProcessUser returned error: %v", err)
 	}
-	if track.Attributes.URL != "https://music.apple.com/us/song/catalog-song/123456789" {
-		t.Fatalf("track URL = %q, want catalog URL", track.Attributes.URL)
+
+	stored, err := testDB.GetLatestTrackForService(user.ID, db.SourceAppleMusic)
+	if err != nil {
+		t.Fatalf("failed to read stored track: %v", err)
+	}
+	if stored == nil {
+		t.Fatal("no track was stored")
+	}
+	if stored.URL != "https://music.apple.com/us/song/catalog-song/123456789" {
+		t.Errorf("stored URL = %q, want the resolved catalog URL", stored.URL)
 	}
 	if got, want := strings.Join(paths, ","), "/v1/me/recent/played/tracks,/v1/me/storefront,/v1/catalog/us/songs"; got != want {
 		t.Fatalf("request paths = %q, want %q", got, want)
 	}
 }
 
-func TestFetchRecentPlayedTracksRequestsLibrarySongs(t *testing.T) {
+// TestProcessUserResolvesCatalogISRC covers the case that tracked The Field's
+// "Everyday" as the Avalanches song of the same name: a library song arrives
+// with no ISRC, and a MusicBrainz lookup left with only title, artist and
+// duration picked a same-titled recording of near-identical length.
+func TestProcessUserResolvesCatalogISRC(t *testing.T) {
 	testDB := newTestDB(t)
-	var gotTypes, gotLimit string
 	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		gotTypes = req.URL.Query().Get("types")
-		gotLimit = req.URL.Query().Get("limit")
+		var body string
+		switch req.URL.Path {
+		case "/v1/me/recent/played/tracks":
+			body = librarySongsJSON("Everyday")
+		case "/v1/me/storefront":
+			body = `{"data":[{"id":"us"}]}`
+		case "/v1/catalog/us/songs":
+			body = `{"data":[{"attributes":{"url":"https://music.apple.com/us/song/everyday/1","isrc":"DEU670700005"}}]}`
+		default:
+			return nil, fmt.Errorf("unexpected request path %q", req.URL.Path)
+		}
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Status:     "200 OK",
-			Body:       io.NopCloser(strings.NewReader(`{"data":[]}`)),
+			Body:       io.NopCloser(strings.NewReader(body)),
 			Header:     make(http.Header),
 		}, nil
 	})
 	svc := newTestService(t, testDB, transport)
+	user := createTestUser(t, testDB)
 
-	if _, err := svc.FetchRecentPlayedTracks(context.Background(), "user-token", 1); err != nil {
-		t.Fatalf("FetchRecentPlayedTracks returned error: %v", err)
+	if err := svc.ProcessUser(context.Background(), user); err != nil {
+		t.Fatalf("ProcessUser returned error: %v", err)
 	}
 
-	if gotTypes != "songs,library-songs" {
-		t.Errorf("types query = %q, want %q", gotTypes, "songs,library-songs")
+	stored, err := testDB.GetLatestTrackForService(user.ID, db.SourceAppleMusic)
+	if err != nil {
+		t.Fatalf("failed to read stored track: %v", err)
 	}
-	if gotLimit != "1" {
-		t.Errorf("limit query = %q, want %q", gotLimit, "1")
+	if stored == nil {
+		t.Fatal("no track was stored")
+	}
+	if stored.ISRC != "DEU670700005" {
+		t.Errorf("stored ISRC = %q, want the resolved catalog ISRC", stored.ISRC)
 	}
 }
 
-func TestFetchRecentPlayedTracksIncludesAppleErrorDetails(t *testing.T) {
+func TestApplyCatalogSongFillsOnlyWhatIsMissing(t *testing.T) {
+	played := "PLAYED0000001"
+	catalog := catalogSong{url: "https://music.apple.com/us/song/catalog/2", isrc: "CATALOG00001"}
+
+	var library AppleRecentTrack
+	applyCatalogSong(&library, catalog)
+	if library.Attributes.URL != catalog.url {
+		t.Errorf("URL = %q, want the catalog URL %q", library.Attributes.URL, catalog.url)
+	}
+	if library.Attributes.Isrc == nil || *library.Attributes.Isrc != catalog.isrc {
+		t.Errorf("ISRC = %v, want the catalog ISRC %q", library.Attributes.Isrc, catalog.isrc)
+	}
+
+	// What Apple reported for the play itself is the better source, so the
+	// catalog record must not overwrite it.
+	var reported AppleRecentTrack
+	reported.Attributes.URL = "https://music.apple.com/us/song/played/1"
+	reported.Attributes.Isrc = &played
+	applyCatalogSong(&reported, catalog)
+	if reported.Attributes.URL != "https://music.apple.com/us/song/played/1" {
+		t.Errorf("URL = %q, want the play's own URL", reported.Attributes.URL)
+	}
+	if *reported.Attributes.Isrc != played {
+		t.Errorf("ISRC = %q, want the play's own ISRC %q", *reported.Attributes.Isrc, played)
+	}
+}
+
+func TestProcessUserBackfillsWindowOldestFirst(t *testing.T) {
+	env := newProcessUserTestEnv(t, recentTracksJSON("D", "C", "B", "A", "Z"))
+	env.seedCatalogTracks(t, "A", "Z")
+
+	if err := env.svc.ProcessUser(context.Background(), env.user); err != nil {
+		t.Fatalf("ProcessUser returned error: %v", err)
+	}
+
+	got := env.storedNames(t)
+	want := []string{"D", "C", "B", "A", "Z"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("stored tracks (newest-first) = %v, want %v", got, want)
+	}
+}
+
+func TestProcessUserRecordsRepeatAfterAnotherTrack(t *testing.T) {
+	// A -> B -> A within one tick: the newest entry equals the newest stored
+	// row, so a naive newest-row comparison would drop both B and the repeat.
+	env := newProcessUserTestEnv(t, recentTracksJSON("A", "B", "A", "Z"))
+	env.seedCatalogTracks(t, "A", "Z")
+
+	if err := env.svc.ProcessUser(context.Background(), env.user); err != nil {
+		t.Fatalf("ProcessUser returned error: %v", err)
+	}
+
+	got := env.storedNames(t)
+	want := []string{"A", "B", "A", "Z"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("stored tracks (newest-first) = %v, want %v", got, want)
+	}
+}
+
+func TestProcessUserIgnoresUnchangedWindow(t *testing.T) {
+	env := newProcessUserTestEnv(t, recentTracksJSON("A", "B", "C"))
+	env.seedCatalogTracks(t, "A", "B", "C")
+
+	if err := env.svc.ProcessUser(context.Background(), env.user); err != nil {
+		t.Fatalf("ProcessUser returned error: %v", err)
+	}
+
+	if got := env.trackCount(t); got != 3 {
+		t.Errorf("expected 3 tracks (nothing new), got %d", got)
+	}
+}
+
+func TestProcessUserFirstSyncTakesNewestOnly(t *testing.T) {
+	// With no history we only establish a cursor: backfilling the window would
+	// publish invented timestamps to the user's PDS.
+	env := newProcessUserTestEnv(t, recentTracksJSON("D", "C", "B", "A"))
+
+	if err := env.svc.ProcessUser(context.Background(), env.user); err != nil {
+		t.Fatalf("ProcessUser returned error: %v", err)
+	}
+
+	got := env.storedNames(t)
+	if len(got) != 1 || got[0] != "D" {
+		t.Errorf("stored tracks = %v, want just [D]", got)
+	}
+}
+
+func TestProcessUserTakesWholeWindowWhenHistoryDiverges(t *testing.T) {
+	env := newProcessUserTestEnv(t, recentTracksJSON("C", "B", "A"))
+	env.seedCatalogTracks(t, "Y", "Z")
+
+	if err := env.svc.ProcessUser(context.Background(), env.user); err != nil {
+		t.Fatalf("ProcessUser returned error: %v", err)
+	}
+
+	got := env.storedNames(t)
+	want := []string{"C", "B", "A", "Y", "Z"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("stored tracks (newest-first) = %v, want %v", got, want)
+	}
+}
+
+func TestProcessUserSavesStrictlyIncreasingTimestamps(t *testing.T) {
+	env := newProcessUserTestEnv(t, recentTracksJSON("D", "C", "B", "A"))
+	env.seedCatalogTracks(t, "A")
+
+	if err := env.svc.ProcessUser(context.Background(), env.user); err != nil {
+		t.Fatalf("ProcessUser returned error: %v", err)
+	}
+
+	tracks, err := env.testDB.GetRecentTracksForService(env.user.ID, db.SourceAppleMusic, 100)
+	if err != nil {
+		t.Fatalf("failed to read stored tracks: %v", err)
+	}
+	// Newest-first, so each timestamp must be strictly after the next one.
+	for i := 0; i+1 < len(tracks); i++ {
+		if !tracks[i].Timestamp.After(tracks[i+1].Timestamp) {
+			t.Errorf("timestamp for %q (%s) is not after %q (%s)",
+				tracks[i].Name, tracks[i].Timestamp, tracks[i+1].Name, tracks[i+1].Timestamp)
+		}
+	}
+}
+
+func TestProcessUserWithoutATProtoSession(t *testing.T) {
+	// A DID with no session id must not panic the tracker.
+	env := newProcessUserTestEnv(t, recentTracksJSON("A"))
+	did := "did:plc:example"
+	env.user.ATProtoDID = &did
+	env.user.MostRecentAtProtoSessionID = nil
+
+	if err := env.svc.ProcessUser(context.Background(), env.user); err != nil {
+		t.Fatalf("ProcessUser returned error: %v", err)
+	}
+	if got := env.trackCount(t); got != 1 {
+		t.Errorf("expected the track to still be saved, got %d", got)
+	}
+}
+
+// statusTransport answers every request with a fixed status and body.
+type statusTransport struct {
+	statusCode int
+	status     string
+	body       string
+	header     http.Header
+}
+
+func (t *statusTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	header := t.header
+	if header == nil {
+		header = make(http.Header)
+	}
+	return &http.Response{
+		StatusCode: t.statusCode,
+		Status:     t.status,
+		Body:       io.NopCloser(strings.NewReader(t.body)),
+		Header:     header,
+	}, nil
+}
+
+func appleMusicToken(t *testing.T, testDB *db.DB, userID int64) string {
+	t.Helper()
+	user, err := testDB.GetUserByID(userID)
+	if err != nil {
+		t.Fatalf("failed to read user: %v", err)
+	}
+	if user.AppleMusicUserToken == nil {
+		return ""
+	}
+	return *user.AppleMusicUserToken
+}
+
+func TestSyncUserClearsTokenOnUnauthorized(t *testing.T) {
 	testDB := newTestDB(t)
-	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		return &http.Response{
-			StatusCode: http.StatusForbidden,
-			Status:     "403 Forbidden",
-			Body: io.NopCloser(strings.NewReader(`{
-				"errors":[{
-					"status":"403",
-					"code":"AUTHORIZATION_ERROR",
-					"title":"Forbidden",
-					"detail":"The music user token is invalid or expired."
-				}]
-			}`)),
-			Header: make(http.Header),
-		}, nil
+	user := createTestUser(t, testDB)
+	svc := newTestService(t, testDB, &statusTransport{
+		statusCode: http.StatusUnauthorized,
+		status:     "401 Unauthorized",
+		body:       `{"errors":[{"status":"401","code":"UNAUTHORIZED","title":"Unauthorized"}]}`,
 	})
+
+	svc.syncUser(context.Background(), user)
+
+	if got := appleMusicToken(t, testDB, user.ID); got != "" {
+		t.Errorf("apple music token = %q, want it cleared", got)
+	}
+}
+
+func TestSyncUserKeepsTokenOnServerError(t *testing.T) {
+	testDB := newTestDB(t)
+	user := createTestUser(t, testDB)
+	svc := newTestService(t, testDB, &statusTransport{
+		statusCode: http.StatusInternalServerError,
+		status:     "500 Internal Server Error",
+		body:       `{"errors":[{"status":"500","title":"Server Error"}]}`,
+	})
+
+	svc.syncUser(context.Background(), user)
+
+	if got := appleMusicToken(t, testDB, user.ID); got != "fake-token" {
+		t.Errorf("apple music token = %q, want it kept", got)
+	}
+	if svc.readyToSync(user.ID) {
+		t.Error("user should be backed off after a transient failure")
+	}
+}
+
+func TestSyncUserHonoursRetryAfter(t *testing.T) {
+	testDB := newTestDB(t)
+	user := createTestUser(t, testDB)
+	header := make(http.Header)
+	header.Set("Retry-After", "1800")
+	svc := newTestService(t, testDB, &statusTransport{
+		statusCode: http.StatusTooManyRequests,
+		status:     "429 Too Many Requests",
+		body:       `{"errors":[{"status":"429","title":"Rate Limited"}]}`,
+		header:     header,
+	})
+
+	svc.syncUser(context.Background(), user)
+
+	if got := appleMusicToken(t, testDB, user.ID); got != "fake-token" {
+		t.Errorf("apple music token = %q, want it kept", got)
+	}
+	if svc.readyToSync(user.ID) {
+		t.Error("user should be deferred after a 429")
+	}
+	state := svc.syncStates[user.ID]
+	if state == nil {
+		t.Fatal("no sync state recorded")
+	}
+	if wait := time.Until(state.nextAttempt); wait < 25*time.Minute {
+		t.Errorf("next attempt in %s, want Retry-After of 30m to be honoured", wait)
+	}
+}
+
+// librarySongsJSON builds a response of library songs, which arrive with no
+// share URL and must have their catalog URL resolved before it can be used.
+func librarySongsJSON(names ...string) string {
+	tracks := make([]any, 0, len(names))
+	for _, name := range names {
+		tracks = append(tracks, map[string]any{
+			"id": "i." + name,
+			"attributes": map[string]any{
+				"name":             name,
+				"artistName":       name + " Artist",
+				"albumName":        name + " Album",
+				"durationInMillis": 180000,
+				"playParams": map[string]any{
+					"id":        "i." + name,
+					"kind":      "song",
+					"catalogId": "cat." + name,
+				},
+			},
+		})
+	}
+	data, _ := json.Marshal(map[string]any{"data": tracks})
+	return string(data)
+}
+
+// countingTransport serves a fixed recently-played response and records which
+// endpoints were hit.
+type countingTransport struct {
+	recent string
+	paths  []string
+}
+
+func (t *countingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	t.paths = append(t.paths, req.URL.Path)
+	body := `{"data":[]}`
+	switch req.URL.Path {
+	case "/v1/me/recent/played/tracks":
+		body = t.recent
+	case "/v1/me/storefront":
+		body = `{"data":[{"id":"us"}]}`
+	default:
+		body = `{"data":[{"attributes":{"url":"https://music.apple.com/us/song/x/1"}}]}`
+	}
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Status:     "200 OK",
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Header:     make(http.Header),
+	}, nil
+}
+
+func TestProcessUserSkipsCatalogLookupWhenHistoryHasResourceIDs(t *testing.T) {
+	testDB := newTestDB(t)
+	user := createTestUser(t, testDB)
+	transport := &countingTransport{recent: librarySongsJSON("Song")}
 	svc := newTestService(t, testDB, transport)
 
-	_, err := svc.FetchRecentPlayedTracks(context.Background(), "user-token", 1)
-	if err == nil {
-		t.Fatal("FetchRecentPlayedTracks returned nil error")
+	// A row carrying the resource id, as ingest now writes it.
+	if _, err := testDB.SaveTrack(user.ID, db.SourceAppleMusic, &models.Track{
+		Name:           "Song",
+		Artist:         []models.Artist{{Name: "Song Artist"}},
+		Album:          "Song Album",
+		URL:            "https://music.apple.com/us/song/song/1",
+		SourceID:       "cat.Song",
+		ServiceBaseUrl: "music.apple.com",
+		Timestamp:      time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("failed to seed track: %v", err)
 	}
-	for _, want := range []string{"403 Forbidden", "Forbidden", "invalid or expired", "AUTHORIZATION_ERROR"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error %q does not contain %q", err, want)
-		}
+
+	if err := svc.ProcessUser(context.Background(), user); err != nil {
+		t.Fatalf("ProcessUser returned error: %v", err)
+	}
+
+	if got := strings.Join(transport.paths, ","); got != "/v1/me/recent/played/tracks" {
+		t.Errorf("request paths = %q, want only the recently-played call", got)
+	}
+}
+
+func TestProcessUserMatchesLegacyRowsByURL(t *testing.T) {
+	// A row written before source_id existed: matching it still requires
+	// resolving the library song's catalog URL.
+	testDB := newTestDB(t)
+	user := createTestUser(t, testDB)
+	transport := &countingTransport{recent: librarySongsJSON("Song")}
+	svc := newTestService(t, testDB, transport)
+
+	if _, err := testDB.SaveTrack(user.ID, db.SourceAppleMusic, &models.Track{
+		Name:           "Song",
+		Artist:         []models.Artist{{Name: "Song Artist"}},
+		Album:          "Song Album",
+		URL:            "https://music.apple.com/us/song/x/1",
+		ServiceBaseUrl: "music.apple.com",
+		Timestamp:      time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("failed to seed track: %v", err)
+	}
+
+	if err := svc.ProcessUser(context.Background(), user); err != nil {
+		t.Fatalf("ProcessUser returned error: %v", err)
+	}
+
+	tracks, err := testDB.GetRecentTracksForService(user.ID, db.SourceAppleMusic, 100)
+	if err != nil {
+		t.Fatalf("failed to read tracks: %v", err)
+	}
+	if len(tracks) != 1 {
+		t.Errorf("expected the legacy row to match (1 track), got %d", len(tracks))
+	}
+	if !slices.Contains(transport.paths, "/v1/me/storefront") {
+		t.Errorf("expected a storefront lookup to resolve the legacy URL, got %v", transport.paths)
+	}
+}
+
+func identitiesOf(ids ...string) []itemIdentity {
+	out := make([]itemIdentity, len(ids))
+	for i, id := range ids {
+		out[i] = itemIdentity{sourceID: id, url: "url:" + id}
+	}
+	return out
+}
+
+func historyOf(ids ...string) []*models.Track {
+	out := make([]*models.Track, len(ids))
+	for i, id := range ids {
+		out[i] = &models.Track{SourceID: id, URL: "url:" + id}
+	}
+	return out
+}
+
+func TestAlignmentOffset(t *testing.T) {
+	tests := []struct {
+		name    string
+		window  []itemIdentity
+		history []*models.Track
+		want    int
+	}{
+		{"nothing new", identitiesOf("a", "b"), historyOf("a", "b"), 0},
+		{"one new", identitiesOf("c", "a", "b"), historyOf("a", "b"), 1},
+		{"repeat after another track", identitiesOf("a", "b", "a", "z"), historyOf("a", "z"), 2},
+		{"no overlap", identitiesOf("c", "b"), historyOf("y", "z"), 2},
+		{"history shorter than window", identitiesOf("c", "b", "a"), historyOf("a"), 2},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := alignmentOffset(tt.window, tt.history); got != tt.want {
+				t.Errorf("alignmentOffset() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAlignmentOffsetFallsBackToURLForLegacyRows(t *testing.T) {
+	// Rows written before source_id existed carry only a URL.
+	window := identitiesOf("a", "b")
+	history := []*models.Track{{URL: "url:a"}, {URL: "url:b"}}
+
+	if got := alignmentOffset(window, history); got != 0 {
+		t.Errorf("alignmentOffset() = %d, want 0 (legacy rows matched on URL)", got)
 	}
 }
 
