@@ -14,6 +14,8 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -27,6 +29,50 @@ import (
 	atprotoservice "github.com/teal-fm/piper/service/atproto"
 	"github.com/teal-fm/piper/service/musicbrainz"
 )
+
+const (
+	// recentWindow is how many recently-played tracks we ask Apple for each
+	// poll. Apple caps this endpoint at 30. A window well above the number of
+	// tracks a user can finish between ticks is what lets us recover plays
+	// missed during downtime.
+	recentWindow = 25
+
+	// apiMaxAttempts bounds how many times a single Apple API read is tried.
+	// Reads are idempotent, so retrying a transient failure is always safe.
+	apiMaxAttempts   = 3
+	apiRetryBaseWait = 500 * time.Millisecond
+
+	// userSyncTimeout bounds the work done for one user in one tick so a hung
+	// request cannot stall everyone behind it. Generous enough for a full
+	// backfill window, which is paced by the MusicBrainz rate limiter.
+	userSyncTimeout = 2 * time.Minute
+
+	// Consecutive failures for one user back off exponentially from
+	// syncBackoffBase up to syncBackoffMax, so a permanently broken account
+	// stops consuming the tick budget every interval.
+	syncBackoffBase = 1 * time.Minute
+	syncBackoffMax  = 15 * time.Minute
+
+	// catalogCacheMax bounds the library-song URL cache in a long-lived process.
+	catalogCacheMax = 1024
+)
+
+// syncState tracks per-user failure backoff between ticks.
+type syncState struct {
+	consecutiveFailures int
+	nextAttempt         time.Time
+}
+
+// nowPlayingState remembers what we last published as a user's now-playing
+// track. Apple has no "currently playing" endpoint, so we treat the newest
+// recently-played track as current and expire it after roughly its own
+// duration rather than letting it sit there indefinitely.
+type nowPlayingState struct {
+	key         string
+	publishedAt time.Time
+	duration    time.Duration
+	cleared     bool
+}
 
 type Service struct {
 	teamID         string
@@ -51,6 +97,13 @@ type Service struct {
 	}
 	httpClient *http.Client
 	logger     *log.Logger
+
+	// per-user sync bookkeeping, guarded by mu. Accessed through helpers that
+	// initialise lazily, since Service is also constructed as a literal.
+	syncStates  map[int64]*syncState
+	nowPlaying  map[int64]*nowPlayingState
+	storefronts map[int64]string
+	catalogURLs map[string]string
 }
 
 func NewService(teamID, keyID, privateKeyPath string) *Service {
@@ -60,6 +113,10 @@ func NewService(teamID, keyID, privateKeyPath string) *Service {
 		privateKeyPath: privateKeyPath,
 		httpClient:     &http.Client{Timeout: 10 * time.Second},
 		logger:         log.New(os.Stdout, "applemusic: ", log.LstdFlags|log.Lmsgprefix),
+		syncStates:     make(map[int64]*syncState),
+		nowPlaying:     make(map[int64]*nowPlayingState),
+		storefronts:    make(map[int64]string),
+		catalogURLs:    make(map[string]string),
 	}
 }
 
@@ -83,22 +140,6 @@ func (s *Service) WithDeps(database *db.DB, atproto *atprotoauth.AuthService, mb
 	s.mbService = mb
 	s.playingNowService = playingNowService
 	return s
-}
-
-func (s *Service) HandleDeveloperToken(w http.ResponseWriter, r *http.Request) {
-	force := r.URL.Query().Get("refresh") == "1"
-	token, exp, err := s.GenerateDeveloperTokenWithForce(force)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("failed to generate token: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_, err = w.Write([]byte(fmt.Sprintf(`{"token":"%s","expiresAt":"%s"}`, token, exp.UTC().Format(time.RFC3339))))
-	if err != nil {
-		s.logger.Printf("failed to write response: %v", err)
-	}
 }
 
 // GenerateDeveloperTokenWithForce allows bypassing caches when force is true.
@@ -145,7 +186,9 @@ func (s *Service) GenerateDeveloperTokenWithForce(force bool) (string, time.Time
 	s.mu.Unlock()
 
 	if s.saveToken != nil {
-		_ = s.saveToken(final, exp)
+		if err := s.saveToken(final, exp); err != nil {
+			return "", time.Time{}, fmt.Errorf("persisting apple music developer token: %w", err)
+		}
 	}
 
 	return final, exp, nil
@@ -161,7 +204,7 @@ func (s *Service) GenerateDeveloperToken() (string, time.Time, error) {
 		token := s.cachedToken
 		exp := s.cachedExpiry
 		s.mu.RUnlock()
-		// Validate cached token claims (aud, iss) to avoid serving bad tokens
+		// Validate cached token claims (iss, exp) to avoid serving bad tokens
 		if s.isTokenStructurallyValid(token) {
 			return token, exp, nil
 		}
@@ -216,13 +259,16 @@ func (s *Service) GenerateDeveloperToken() (string, time.Time, error) {
 	s.mu.Unlock()
 
 	if s.saveToken != nil {
-		_ = s.saveToken(final, exp)
+		if err := s.saveToken(final, exp); err != nil {
+			return "", time.Time{}, fmt.Errorf("persisting apple music developer token: %w", err)
+		}
 	}
 
 	return final, exp, nil
 }
 
-// isTokenStructurallyValid parses without verification and checks claims for iss and exp
+// isTokenStructurallyValid parses without verification and checks the iss and
+// exp claims. The signature is ours, so there is nothing to verify against.
 func (s *Service) isTokenStructurallyValid(token string) bool {
 	if token == "" {
 		return false
@@ -308,9 +354,35 @@ type appleMusicErrorResponse struct {
 	} `json:"errors"`
 }
 
-func newAppleMusicAPIError(status string, body []byte) error {
+// apiError carries the Apple Music status code alongside the formatted message
+// so callers can tell a dead user token apart from a blip on Apple's side.
+type apiError struct {
+	StatusCode int
+	RetryAfter time.Duration
+	message    string
+}
+
+func (e *apiError) Error() string { return e.message }
+
+// permanent reports whether retrying could ever succeed. Apple answers 401 or
+// 403 when the Music-User-Token has expired or the user revoked access; only
+// re-linking fixes that.
+func (e *apiError) permanent() bool {
+	return e.StatusCode == http.StatusUnauthorized || e.StatusCode == http.StatusForbidden
+}
+
+// retryable reports whether the same request is worth repeating within this
+// tick. 429 is deliberately excluded: we honour Retry-After by deferring the
+// user instead of holding the cycle open.
+func (e *apiError) retryable() bool {
+	return e.StatusCode >= 500
+}
+
+func newAppleMusicAPIError(statusCode int, status string, body []byte, retryAfter time.Duration) *apiError {
+	err := &apiError{StatusCode: statusCode, RetryAfter: retryAfter}
+
 	var parsed appleMusicErrorResponse
-	if err := json.Unmarshal(body, &parsed); err == nil && len(parsed.Errors) > 0 {
+	if jsonErr := json.Unmarshal(body, &parsed); jsonErr == nil && len(parsed.Errors) > 0 {
 		apiErr := parsed.Errors[0]
 		message := strings.TrimSpace(apiErr.Title)
 		if detail := strings.TrimSpace(apiErr.Detail); detail != "" {
@@ -326,14 +398,77 @@ func newAppleMusicAPIError(status string, body []byte) error {
 			message += "[" + code + "]"
 		}
 		if message != "" {
-			return fmt.Errorf("apple music api error: %s: %s", status, message)
+			err.message = fmt.Sprintf("apple music api error: %s: %s", status, message)
+			return err
 		}
 	}
 
-	return fmt.Errorf("apple music api error: %s", status)
+	err.message = fmt.Sprintf("apple music api error: %s", status)
+	return err
 }
 
-// FetchRecentPlayedTracks calls Apple Music API for a user token
+// parseRetryAfter reads a Retry-After header, which Apple sends as a delay in
+// seconds. An absent or unparseable value yields zero.
+func parseRetryAfter(header string) time.Duration {
+	seconds, err := strconv.Atoi(strings.TrimSpace(header))
+	if err != nil || seconds <= 0 {
+		return 0
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+// doAPIRequest executes an Apple Music GET and returns the body, retrying
+// transient failures with exponential backoff. newReq builds a fresh request
+// per attempt so nothing is reused across retries.
+func (s *Service) doAPIRequest(ctx context.Context, newReq func() (*http.Request, error)) ([]byte, error) {
+	var lastErr error
+
+	for attempt := range apiMaxAttempts {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(apiRetryBaseWait << (attempt - 1)):
+			}
+		}
+
+		req, err := newReq()
+		if err != nil {
+			return nil, err
+		}
+
+		resp, err := s.httpClient.Do(req)
+		if err != nil {
+			// Network-level failure (timeout, connection reset): transient.
+			lastErr = err
+			continue
+		}
+
+		body, readErr := io.ReadAll(resp.Body)
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			s.logger.Printf("failed to close response body: %v", closeErr)
+		}
+		if readErr != nil {
+			lastErr = fmt.Errorf("failed to read response body: %w", readErr)
+			continue
+		}
+
+		if resp.StatusCode == http.StatusOK {
+			return body, nil
+		}
+
+		apiErr := newAppleMusicAPIError(resp.StatusCode, resp.Status, body, parseRetryAfter(resp.Header.Get("Retry-After")))
+		if !apiErr.retryable() {
+			return nil, apiErr
+		}
+		lastErr = apiErr
+	}
+
+	return nil, lastErr
+}
+
+// FetchRecentPlayedTracks calls Apple Music API for a user token. Results come
+// back newest-first.
 func (s *Service) FetchRecentPlayedTracks(ctx context.Context, userToken string, limit int) ([]AppleRecentTrack, error) {
 	if limit <= 0 || limit > 30 {
 		limit = 25
@@ -348,31 +483,17 @@ func (s *Service) FetchRecentPlayedTracks(ctx context.Context, userToken string,
 	q.Set("types", "songs,library-songs")
 	endpoint.RawQuery = q.Encode()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+devToken)
-	req.Header.Set("Music-User-Token", userToken)
-
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer func(Body io.ReadCloser) {
-		err := Body.Close()
+	bodyBytes, err := s.doAPIRequest(ctx, func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
 		if err != nil {
-			s.logger.Printf("failed to close response body: %v", err)
+			return nil, err
 		}
-	}(resp.Body)
-
-	bodyBytes, err := io.ReadAll(resp.Body)
+		req.Header.Set("Authorization", "Bearer "+devToken)
+		req.Header.Set("Music-User-Token", userToken)
+		return req, nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, newAppleMusicAPIError(resp.Status, bodyBytes)
+		return nil, err
 	}
 
 	var parsed recentPlayedResponse
@@ -382,8 +503,60 @@ func (s *Service) FetchRecentPlayedTracks(ctx context.Context, userToken string,
 	return parsed.Data, nil
 }
 
-// toTrack converts AppleRecentTrack to internal models.Track
-func (s *Service) toTrack(t AppleRecentTrack) *models.Track {
+// trackKey returns the URL to persist for a track. Uploaded tracks carry no
+// catalog URL, so they fall back to a hash of their metadata.
+func trackKey(t *AppleRecentTrack) string {
+	if t.Attributes.URL != "" {
+		return t.Attributes.URL
+	}
+	return generateUploadHash(t)
+}
+
+// appleResourceID returns Apple's own identity for a play, which is what we
+// match history on. The catalog id is preferred because the same song reports
+// a different resource id depending on whether it was played from the catalog
+// or from the user's library. Entries with no id at all (uploads) fall back to
+// a metadata hash.
+func appleResourceID(t *AppleRecentTrack) string {
+	if t.Attributes.PlayParams != nil {
+		if id := t.Attributes.PlayParams.CatalogID; id != "" {
+			return id
+		}
+		if id := t.Attributes.PlayParams.ID; id != "" {
+			return id
+		}
+	}
+	if t.ID != "" {
+		return t.ID
+	}
+	return generateUploadHash(t)
+}
+
+// itemIdentity carries both identities a stored row might have been written
+// with, so the cursor keeps working across rows saved before and after
+// source_id existed.
+type itemIdentity struct {
+	sourceID string
+	url      string
+}
+
+func identify(t *AppleRecentTrack) itemIdentity {
+	return itemIdentity{sourceID: appleResourceID(t), url: trackKey(t)}
+}
+
+// matches reports whether a stored row refers to this play. Rows written before
+// source_id existed can only be compared on their URL.
+func (k itemIdentity) matches(stored *models.Track) bool {
+	if stored.SourceID != "" {
+		return stored.SourceID == k.sourceID
+	}
+	return stored.URL == k.url
+}
+
+// toTrack converts AppleRecentTrack to internal models.Track. playedAt is
+// synthesised by the caller: Apple's recently-played endpoint returns no
+// played-at timestamp of its own.
+func (s *Service) toTrack(t AppleRecentTrack, playedAt time.Time) *models.Track {
 	var duration int64
 	if t.Attributes.DurationInMillis != nil {
 		duration = *t.Attributes.DurationInMillis
@@ -393,27 +566,20 @@ func (s *Service) toTrack(t AppleRecentTrack) *models.Track {
 		isrc = *t.Attributes.Isrc
 	}
 
-	// Similar stamping logic to Spotify: stamp if played more than half (or 30 seconds whichever is greater)
-	// Since Apple Music recent played tracks don't provide play progress, we assume full plays
-	isStamped := duration > 30000 && duration >= duration/2
-
 	track := &models.Track{
 		Name:           t.Attributes.Name,
 		Artist:         []models.Artist{{Name: t.Attributes.ArtistName}},
 		Album:          t.Attributes.AlbumName,
-		URL:            t.Attributes.URL,
+		URL:            trackKey(&t),
 		DurationMs:     duration,
 		ProgressMs:     duration, // Assume full play since Apple Music doesn't provide partial plays
 		ServiceBaseUrl: "music.apple.com",
 		ISRC:           isrc,
-		HasStamped:     isStamped,
-		Timestamp:      time.Now().UTC(),
-	}
-
-	// If an Apple Music track has no URL, it's an uploaded track; generate an uploadHash so that the
-	// track can be distinguished from other uploaded tracks
-	if track.URL == "" {
-		track.URL = generateUploadHash(&t)
+		SourceID:       appleResourceID(&t),
+		// Apple only lists a track under recently-played once it has actually
+		// been played, so anything we see here is a completed listen.
+		HasStamped: true,
+		Timestamp:  playedAt,
 	}
 
 	if s.mbService != nil {
@@ -425,35 +591,69 @@ func (s *Service) toTrack(t AppleRecentTrack) *models.Track {
 	return track
 }
 
-// GetCurrentAppleMusicTrack fetches the most recent Apple Music track for a user
-func (s *Service) GetCurrentAppleMusicTrack(ctx context.Context, user *models.User) (*AppleRecentTrack, error) {
-	if user.AppleMusicUserToken == nil || *user.AppleMusicUserToken == "" {
-		return nil, nil
+// storefrontID returns the user's Apple Music storefront, caching it for the
+// process lifetime. A storefront is effectively constant per account, and
+// re-fetching it for every library song is a request we can do without.
+func (s *Service) storefrontID(ctx context.Context, user *models.User, devToken string) (string, error) {
+	s.mu.RLock()
+	cached, ok := s.storefronts[user.ID]
+	s.mu.RUnlock()
+	if ok {
+		return cached, nil
 	}
 
-	// Only fetch the most recent track (limit=1)
-	items, err := s.FetchRecentPlayedTracks(ctx, *user.AppleMusicUserToken, 1)
+	endpoint := &url.URL{Scheme: "https", Host: "api.music.apple.com", Path: "/v1/me/storefront"}
+	body, err := s.doAPIRequest(ctx, func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+devToken)
+		req.Header.Set("Music-User-Token", *user.AppleMusicUserToken)
+		return req, nil
+	})
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 
-	if len(items) == 0 {
-		return nil, nil
+	var storefront struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &storefront); err != nil {
+		return "", fmt.Errorf("failed to decode storefront response: %w", err)
+	}
+	if len(storefront.Data) == 0 || storefront.Data[0].ID == "" {
+		return "", errors.New("Apple Music storefront response contained no storefront")
 	}
 
-	// Library songs may omit attributes.url even when they correspond to a
-	// catalog song. Resolve the catalog URL before the track is persisted.
-	if err := s.populateCatalogURL(ctx, *user.AppleMusicUserToken, &items[0]); err != nil {
-		s.logger.Printf("failed to resolve Apple Music catalog URL for %q: %v", items[0].Attributes.Name, err)
+	s.mu.Lock()
+	if s.storefronts == nil {
+		s.storefronts = make(map[int64]string)
 	}
+	s.storefronts[user.ID] = storefront.Data[0].ID
+	s.mu.Unlock()
 
-	return &items[0], nil
+	return storefront.Data[0].ID, nil
 }
 
 // populateCatalogURL fills in the share URL for a library song when Apple
 // provides the corresponding catalog ID in its play parameters.
-func (s *Service) populateCatalogURL(ctx context.Context, userToken string, track *AppleRecentTrack) error {
+func (s *Service) populateCatalogURL(ctx context.Context, user *models.User, track *AppleRecentTrack) error {
 	if track == nil || track.Attributes.URL != "" || track.Attributes.PlayParams == nil || track.Attributes.PlayParams.CatalogID == "" {
+		return nil
+	}
+
+	catalogID := track.Attributes.PlayParams.CatalogID
+
+	// The window largely repeats between ticks, so caching keeps the scan at
+	// roughly zero extra requests in the steady state.
+	s.mu.RLock()
+	cachedURL, ok := s.catalogURLs[catalogID]
+	s.mu.RUnlock()
+	if ok {
+		track.Attributes.URL = cachedURL
 		return nil
 	}
 
@@ -462,67 +662,30 @@ func (s *Service) populateCatalogURL(ctx context.Context, userToken string, trac
 		return err
 	}
 
-	storefrontEndpoint := &url.URL{Scheme: "https", Host: "api.music.apple.com", Path: "/v1/me/storefront"}
-	storefrontReq, err := http.NewRequestWithContext(ctx, http.MethodGet, storefrontEndpoint.String(), nil)
+	storefrontID, err := s.storefrontID(ctx, user, devToken)
 	if err != nil {
 		return err
-	}
-	storefrontReq.Header.Set("Authorization", "Bearer "+devToken)
-	storefrontReq.Header.Set("Music-User-Token", userToken)
-
-	storefrontResp, err := s.httpClient.Do(storefrontReq)
-	if err != nil {
-		return err
-	}
-	defer storefrontResp.Body.Close()
-
-	storefrontBody, err := io.ReadAll(storefrontResp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read storefront response: %w", err)
-	}
-	if storefrontResp.StatusCode != http.StatusOK {
-		return newAppleMusicAPIError(storefrontResp.Status, storefrontBody)
-	}
-
-	var storefront struct {
-		Data []struct {
-			ID string `json:"id"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(storefrontBody, &storefront); err != nil {
-		return fmt.Errorf("failed to decode storefront response: %w", err)
-	}
-	if len(storefront.Data) == 0 || storefront.Data[0].ID == "" {
-		return errors.New("Apple Music storefront response contained no storefront")
 	}
 
 	catalogEndpoint := &url.URL{
 		Scheme: "https",
 		Host:   "api.music.apple.com",
-		Path:   "/v1/catalog/" + url.PathEscape(storefront.Data[0].ID) + "/songs",
+		Path:   "/v1/catalog/" + url.PathEscape(storefrontID) + "/songs",
 	}
 	query := catalogEndpoint.Query()
-	query.Set("ids", track.Attributes.PlayParams.CatalogID)
+	query.Set("ids", catalogID)
 	catalogEndpoint.RawQuery = query.Encode()
 
-	catalogReq, err := http.NewRequestWithContext(ctx, http.MethodGet, catalogEndpoint.String(), nil)
+	catalogBody, err := s.doAPIRequest(ctx, func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, catalogEndpoint.String(), nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+devToken)
+		return req, nil
+	})
 	if err != nil {
 		return err
-	}
-	catalogReq.Header.Set("Authorization", "Bearer "+devToken)
-
-	catalogResp, err := s.httpClient.Do(catalogReq)
-	if err != nil {
-		return err
-	}
-	defer catalogResp.Body.Close()
-
-	catalogBody, err := io.ReadAll(catalogResp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read catalog song response: %w", err)
-	}
-	if catalogResp.StatusCode != http.StatusOK {
-		return newAppleMusicAPIError(catalogResp.Status, catalogBody)
 	}
 
 	var catalog struct {
@@ -540,83 +703,274 @@ func (s *Service) populateCatalogURL(ctx context.Context, userToken string, trac
 	}
 
 	track.Attributes.URL = catalog.Data[0].Attributes.URL
+
+	s.mu.Lock()
+	if s.catalogURLs == nil {
+		s.catalogURLs = make(map[string]string)
+	}
+	// Crude bound: this is a lookup cache, so dropping it wholesale just costs
+	// a few requests on the next poll.
+	if len(s.catalogURLs) >= catalogCacheMax {
+		clear(s.catalogURLs)
+	}
+	s.catalogURLs[catalogID] = track.Attributes.URL
+	s.mu.Unlock()
+
 	return nil
 }
 
-// ProcessUser checks for new Apple Music tracks and processes them
+// ProcessUser ingests every Apple Music play that has appeared since the last
+// track stored for this user.
+//
+// Apple exposes only a recently-played history: there is no "currently
+// playing" endpoint and no played-at timestamp on any entry. So we poll a
+// window of recent plays and line it up against the history we already hold to
+// work out which entries are new.
 func (s *Service) ProcessUser(ctx context.Context, user *models.User) error {
 	if user.AppleMusicUserToken == nil || *user.AppleMusicUserToken == "" {
 		return nil
 	}
 
-	// Fetch only the most recent track
-	currentAppleTrack, err := s.GetCurrentAppleMusicTrack(ctx, user)
+	items, err := s.FetchRecentPlayedTracks(ctx, *user.AppleMusicUserToken, recentWindow)
 	if err != nil {
-		s.logger.Printf("failed to get current Apple Music track for user %d: %v", user.ID, err)
 		return err
 	}
+	if len(items) == 0 {
+		return nil
+	}
 
-	if currentAppleTrack == nil {
-		s.logger.Printf("no current Apple Music track for user %d", user.ID)
-		// Clear playing now status if no track is playing
-		if s.playingNowService != nil {
-			if err := s.playingNowService.ClearPlayingNow(ctx, user.ID); err != nil {
-				s.logger.Printf("Error clearing playing now for user %d: %v", user.ID, err)
+	stored, err := s.DB.GetRecentTracksForService(user.ID, db.SourceAppleMusic, recentWindow)
+	if err != nil {
+		// Without our own history we cannot tell new plays from old ones, and
+		// guessing would duplicate the whole window.
+		return fmt.Errorf("reading stored apple music tracks for user %d: %w", user.ID, err)
+	}
+
+	newItems := s.newSince(ctx, user, items, stored)
+	if len(newItems) == 0 {
+		s.expireNowPlaying(ctx, user.ID)
+		return nil
+	}
+	if len(stored) > 0 && len(newItems) == len(items) {
+		s.logger.Printf(
+			"user %d: stored history does not line up with the %d-track window; earlier plays may have been missed",
+			user.ID, len(items))
+	}
+
+	var lastTrack *models.Track
+	if len(stored) > 0 {
+		lastTrack = stored[0]
+	}
+	playedAt := batchTimestamps(newItems, lastTrack)
+
+	// Save oldest-first so an interruption leaves a contiguous watermark and
+	// the next tick resumes exactly where this one stopped.
+	var newest *models.Track
+	for i := len(newItems) - 1; i >= 0; i-- {
+		track, err := s.ingest(ctx, user, newItems[i], playedAt[i])
+		if err != nil {
+			return err
+		}
+		if i == 0 {
+			newest = track
+		}
+	}
+
+	if newest != nil {
+		s.publishNowPlaying(ctx, user.ID, newest, appleResourceID(&newItems[0]))
+	}
+
+	return nil
+}
+
+// newSince returns the window entries played since we last synced, newest-first.
+//
+// Matching only the single newest stored row is not enough: if the user goes
+// A -> B -> A, the newest window entry is A, which equals the stored row, and
+// both B and the repeat would be dropped. Matching the *last* occurrence
+// instead would re-ingest the whole window whenever an older play of the same
+// track is still in it.
+//
+// So we align sequences: find the smallest offset at which the remainder of
+// Apple's window lines up with the history we already hold. That offset is
+// exactly how many plays are new, and it handles repeats without duplicating.
+func (s *Service) newSince(ctx context.Context, user *models.User, items []AppleRecentTrack, stored []*models.Track) []AppleRecentTrack {
+	// First sync for this user: take only the newest play to establish a
+	// cursor. Backfilling the whole window here would publish a batch of
+	// historical plays to their PDS with timestamps we invented.
+	if len(stored) == 0 {
+		return items[:1]
+	}
+
+	// Rows saved before source_id existed can only be matched on their URL, and
+	// for a library song that means resolving its catalog URL first. Once those
+	// rows age out of the window this round trip disappears entirely.
+	needURLs := false
+	for _, track := range stored {
+		if track.SourceID == "" {
+			needURLs = true
+			break
+		}
+	}
+
+	window := make([]itemIdentity, len(items))
+	for i := range items {
+		if ctx.Err() != nil {
+			return nil
+		}
+		if needURLs {
+			if err := s.populateCatalogURL(ctx, user, &items[i]); err != nil {
+				s.logger.Printf("failed to resolve Apple Music catalog URL for %q: %v", items[i].Attributes.Name, err)
 			}
 		}
-		return nil
+		window[i] = identify(&items[i])
 	}
 
-	lastTrack, err := s.DB.GetLatestTrackForService(user.ID, db.SourceAppleMusic)
-	if err != nil {
-		s.logger.Printf("failed to get last apple music track for user %d: %v", user.ID, err)
-	}
+	return items[:alignmentOffset(window, stored)]
+}
 
-	// Pre-compute the hash for uploaded tracks so comparisons against stored
-	// latest tracks will work
-	currentURL := currentAppleTrack.Attributes.URL
-	if currentURL == "" {
-		currentURL = generateUploadHash(currentAppleTrack)
-	}
-
-	// Check if this is a new track (by URL / upload hash)
-	if lastTrack != nil && lastTrack.URL == currentURL {
-		s.logger.Printf("track unchanged for user %d: %s by %s", user.ID, currentAppleTrack.Attributes.Name, currentAppleTrack.Attributes.ArtistName)
-		return nil
-	}
-
-	// Convert to internal track format
-	track := s.toTrack(*currentAppleTrack)
-	if track == nil || strings.TrimSpace(track.Name) == "" || len(track.Artist) == 0 {
-		s.logger.Printf("invalid track data for user %d", user.ID)
-		return nil
-	}
-
-	// Hydration is handled in toTrack() using MusicBrainz search; no ISRC-only hydration here
-
-	// Save the new track
-	if _, err := s.DB.SaveTrack(user.ID, db.SourceAppleMusic, track); err != nil {
-		s.logger.Printf("failed saving apple track for user %d: %v", user.ID, err)
-		return err
-	}
-
-	s.logger.Printf("saved new track for user %d: %s by %s", user.ID, track.Name, track.Artist[0].Name)
-
-	// Publish playing now status
-	if s.playingNowService != nil {
-		if err := s.playingNowService.PublishPlayingNow(ctx, user.ID, track); err != nil {
-			s.logger.Printf("Error publishing playing now for user %d: %v", user.ID, err)
+// alignmentOffset returns how many entries at the head of window are new, by
+// finding the smallest offset at which the rest of window matches the start of
+// history. A window that matches nothing is treated as entirely new.
+func alignmentOffset(window []itemIdentity, history []*models.Track) int {
+	for offset := range window {
+		if matchesHistory(window[offset:], history) {
+			return offset
 		}
 	}
+	return len(window)
+}
 
-	// Submit to PDS
+// matchesHistory reports whether tail is a prefix of history, comparing over
+// whichever is shorter. Both are newest-first.
+//
+// The comparison is only as strong as the history is deep. With a single
+// stored row, a window of A B A matches at offset 0 as readily as at offset 2,
+// so an immediate repeat right after a user's first ever sync is missed once.
+// Every later poll has enough history to disambiguate.
+func matchesHistory(tail []itemIdentity, history []*models.Track) bool {
+	n := min(len(tail), len(history))
+	if n == 0 {
+		return false
+	}
+	for i := range n {
+		if !tail[i].matches(history[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// batchTimestamps synthesises a played-at for each entry of a newest-first
+// batch. Apple gives us none, and the watermark query orders by timestamp, so
+// these have to be strictly increasing in play order or the cursor breaks.
+//
+// The newest entry is taken as "now" and each older entry is backdated by its
+// own duration, which is what back-to-back playback would have looked like.
+// Entries may therefore predate lastTrack; that is honest (they were played
+// before we noticed) and harmless, since the cursor only reads the newest row.
+func batchTimestamps(items []AppleRecentTrack, lastTrack *models.Track) []time.Time {
+	base := time.Now().UTC()
+	// Guarantee the batch outranks the existing watermark even if the previous
+	// save landed in the same second.
+	if lastTrack != nil && !base.After(lastTrack.Timestamp) {
+		base = lastTrack.Timestamp.Add(time.Second)
+	}
+
+	stamps := make([]time.Time, len(items))
+	for i := range items {
+		if i == 0 {
+			stamps[i] = base
+			continue
+		}
+		gap := time.Second
+		if d := items[i].Attributes.DurationInMillis; d != nil && *d >= int64(time.Second/time.Millisecond) {
+			gap = time.Duration(*d) * time.Millisecond
+		}
+		stamps[i] = stamps[i-1].Add(-gap)
+	}
+	return stamps
+}
+
+// ingest persists one play and submits it to the user's PDS. It returns nil
+// when the entry carried no usable metadata.
+func (s *Service) ingest(ctx context.Context, user *models.User, item AppleRecentTrack, playedAt time.Time) (*models.Track, error) {
+	// Library songs arrive without a share URL. Resolve it here so the play we
+	// persist carries a real origin URI. This is a no-op when the scan already
+	// resolved it.
+	if err := s.populateCatalogURL(ctx, user, &item); err != nil {
+		s.logger.Printf("failed to resolve Apple Music catalog URL for %q: %v", item.Attributes.Name, err)
+	}
+
+	track := s.toTrack(item, playedAt)
+	if strings.TrimSpace(track.Name) == "" || len(track.Artist) == 0 {
+		s.logger.Printf("skipping track with no usable metadata for user %d", user.ID)
+		return nil, nil
+	}
+
+	if _, err := s.DB.SaveTrack(user.ID, db.SourceAppleMusic, track); err != nil {
+		return nil, fmt.Errorf("saving apple music track for user %d: %w", user.ID, err)
+	}
+
+	s.logger.Printf("saved track for user %d: %s by %s", user.ID, track.Name, track.Artist[0].Name)
+
 	if user.ATProtoDID != nil && user.MostRecentAtProtoSessionID != nil && s.atprotoService != nil {
 		if err := atprotoservice.SubmitPlayToPDS(ctx, *user.ATProtoDID, *user.MostRecentAtProtoSessionID, track, s.atprotoService); err != nil {
 			s.logger.Printf("failed submit to PDS for user %d: %v", user.ID, err)
 		}
 	}
 
-	return nil
+	return track, nil
+}
+
+// publishNowPlaying announces the newest play as the user's current track and
+// records when it was published so it can be expired later.
+func (s *Service) publishNowPlaying(ctx context.Context, userID int64, track *models.Track, key string) {
+	if s.playingNowService == nil {
+		return
+	}
+
+	if err := s.playingNowService.PublishPlayingNow(ctx, userID, track); err != nil {
+		s.logger.Printf("Error publishing playing now for user %d: %v", userID, err)
+		return
+	}
+
+	duration := time.Duration(track.DurationMs) * time.Millisecond
+	if duration <= 0 {
+		duration = 5 * time.Minute
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.nowPlaying == nil {
+		s.nowPlaying = make(map[int64]*nowPlayingState)
+	}
+	s.nowPlaying[userID] = &nowPlayingState{key: key, publishedAt: time.Now(), duration: duration}
+}
+
+// expireNowPlaying clears a now-playing status once the track we published has
+// had time to finish. Apple cannot tell us playback stopped, so elapsed time is
+// the only signal available.
+func (s *Service) expireNowPlaying(ctx context.Context, userID int64) {
+	if s.playingNowService == nil {
+		return
+	}
+
+	s.mu.Lock()
+	state := s.nowPlaying[userID]
+	expired := state != nil && !state.cleared && time.Since(state.publishedAt) > state.duration
+	if expired {
+		state.cleared = true
+	}
+	s.mu.Unlock()
+
+	if !expired {
+		return
+	}
+
+	if err := s.playingNowService.ClearPlayingNow(ctx, userID); err != nil {
+		s.logger.Printf("Error clearing playing now for user %d: %v", userID, err)
+	}
 }
 
 // StartListeningTracker periodically fetches recent plays for Apple Music linked users
@@ -646,8 +1000,91 @@ func (s *Service) runOnce(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		if err := s.ProcessUser(ctx, u); err != nil {
-			s.logger.Printf("error processing user %d: %v", u.ID, err)
+		if !s.readyToSync(u.ID) {
+			continue
 		}
+		s.syncUser(ctx, u)
 	}
+}
+
+// syncUser runs one user's sync under its own deadline, converting a panic into
+// a logged error. The tracker shares a process with the HTTP server, so one bad
+// row must not take the whole of piper down with it.
+func (s *Service) syncUser(ctx context.Context, user *models.User) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.logger.Printf("panic processing user %d: %v\n%s", user.ID, r, debug.Stack())
+			s.recordFailure(user.ID, 0)
+		}
+	}()
+
+	userCtx, cancel := context.WithTimeout(ctx, userSyncTimeout)
+	defer cancel()
+
+	err := s.ProcessUser(userCtx, user)
+	if err == nil {
+		s.recordSuccess(user.ID)
+		return
+	}
+
+	s.logger.Printf("error processing user %d: %v", user.ID, err)
+
+	var apiErr *apiError
+	if errors.As(err, &apiErr) {
+		if apiErr.permanent() {
+			// The Music-User-Token is expired or revoked. Drop it so the user
+			// falls out of the poll roster and the UI prompts a re-link
+			// instead of us retrying a dead token forever.
+			s.logger.Printf("clearing dead Apple Music token for user %d: %v", user.ID, err)
+			if clearErr := s.DB.ClearAppleMusicUserToken(user.ID); clearErr != nil {
+				s.logger.Printf("failed clearing Apple Music token for user %d: %v", user.ID, clearErr)
+			}
+			s.recordSuccess(user.ID)
+			return
+		}
+		s.recordFailure(user.ID, apiErr.RetryAfter)
+		return
+	}
+
+	s.recordFailure(user.ID, 0)
+}
+
+// readyToSync reports whether a user's backoff window has elapsed.
+func (s *Service) readyToSync(userID int64) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	state := s.syncStates[userID]
+	return state == nil || !time.Now().Before(state.nextAttempt)
+}
+
+func (s *Service) recordSuccess(userID int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.syncStates, userID)
+}
+
+// recordFailure backs a user off exponentially. retryAfter, when Apple supplied
+// one, wins over the computed delay.
+func (s *Service) recordFailure(userID int64, retryAfter time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.syncStates == nil {
+		s.syncStates = make(map[int64]*syncState)
+	}
+	state := s.syncStates[userID]
+	if state == nil {
+		state = &syncState{}
+		s.syncStates[userID] = state
+	}
+	state.consecutiveFailures++
+
+	delay := syncBackoffBase << min(state.consecutiveFailures-1, 8)
+	if delay > syncBackoffMax {
+		delay = syncBackoffMax
+	}
+	if retryAfter > delay {
+		delay = retryAfter
+	}
+	state.nextAttempt = time.Now().Add(delay)
 }
