@@ -314,6 +314,77 @@ func TestProcessUserResolvesCatalogURL(t *testing.T) {
 	}
 }
 
+// TestProcessUserResolvesCatalogISRC covers the case that tracked The Field's
+// "Everyday" as the Avalanches song of the same name: a library song arrives
+// with no ISRC, and a MusicBrainz lookup left with only title, artist and
+// duration picked a same-titled recording of near-identical length.
+func TestProcessUserResolvesCatalogISRC(t *testing.T) {
+	testDB := newTestDB(t)
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		var body string
+		switch req.URL.Path {
+		case "/v1/me/recent/played/tracks":
+			body = librarySongsJSON("Everyday")
+		case "/v1/me/storefront":
+			body = `{"data":[{"id":"us"}]}`
+		case "/v1/catalog/us/songs":
+			body = `{"data":[{"attributes":{"url":"https://music.apple.com/us/song/everyday/1","isrc":"DEU670700005"}}]}`
+		default:
+			return nil, fmt.Errorf("unexpected request path %q", req.URL.Path)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Header:     make(http.Header),
+		}, nil
+	})
+	svc := newTestService(t, testDB, transport)
+	user := createTestUser(t, testDB)
+
+	if err := svc.ProcessUser(context.Background(), user); err != nil {
+		t.Fatalf("ProcessUser returned error: %v", err)
+	}
+
+	stored, err := testDB.GetLatestTrackForService(user.ID, db.SourceAppleMusic)
+	if err != nil {
+		t.Fatalf("failed to read stored track: %v", err)
+	}
+	if stored == nil {
+		t.Fatal("no track was stored")
+	}
+	if stored.ISRC != "DEU670700005" {
+		t.Errorf("stored ISRC = %q, want the resolved catalog ISRC", stored.ISRC)
+	}
+}
+
+func TestApplyCatalogSongFillsOnlyWhatIsMissing(t *testing.T) {
+	played := "PLAYED0000001"
+	catalog := catalogSong{url: "https://music.apple.com/us/song/catalog/2", isrc: "CATALOG00001"}
+
+	var library AppleRecentTrack
+	applyCatalogSong(&library, catalog)
+	if library.Attributes.URL != catalog.url {
+		t.Errorf("URL = %q, want the catalog URL %q", library.Attributes.URL, catalog.url)
+	}
+	if library.Attributes.Isrc == nil || *library.Attributes.Isrc != catalog.isrc {
+		t.Errorf("ISRC = %v, want the catalog ISRC %q", library.Attributes.Isrc, catalog.isrc)
+	}
+
+	// What Apple reported for the play itself is the better source, so the
+	// catalog record must not overwrite it.
+	var reported AppleRecentTrack
+	reported.Attributes.URL = "https://music.apple.com/us/song/played/1"
+	reported.Attributes.Isrc = &played
+	applyCatalogSong(&reported, catalog)
+	if reported.Attributes.URL != "https://music.apple.com/us/song/played/1" {
+		t.Errorf("URL = %q, want the play's own URL", reported.Attributes.URL)
+	}
+	if *reported.Attributes.Isrc != played {
+		t.Errorf("ISRC = %q, want the play's own ISRC %q", *reported.Attributes.Isrc, played)
+	}
+}
+
 func TestProcessUserBackfillsWindowOldestFirst(t *testing.T) {
 	env := newProcessUserTestEnv(t, recentTracksJSON("D", "C", "B", "A", "Z"))
 	env.seedCatalogTracks(t, "A", "Z")

@@ -53,7 +53,8 @@ const (
 	syncBackoffBase = 1 * time.Minute
 	syncBackoffMax  = 15 * time.Minute
 
-	// catalogCacheMax bounds the library-song URL cache in a long-lived process.
+	// catalogCacheMax bounds the library-song catalog cache in a long-lived
+	// process.
 	catalogCacheMax = 1024
 )
 
@@ -100,10 +101,10 @@ type Service struct {
 
 	// per-user sync bookkeeping, guarded by mu. Accessed through helpers that
 	// initialise lazily, since Service is also constructed as a literal.
-	syncStates  map[int64]*syncState
-	nowPlaying  map[int64]*nowPlayingState
-	storefronts map[int64]string
-	catalogURLs map[string]string
+	syncStates   map[int64]*syncState
+	nowPlaying   map[int64]*nowPlayingState
+	storefronts  map[int64]string
+	catalogSongs map[string]catalogSong
 }
 
 func NewService(teamID, keyID, privateKeyPath string) *Service {
@@ -116,7 +117,7 @@ func NewService(teamID, keyID, privateKeyPath string) *Service {
 		syncStates:     make(map[int64]*syncState),
 		nowPlaying:     make(map[int64]*nowPlayingState),
 		storefronts:    make(map[int64]string),
-		catalogURLs:    make(map[string]string),
+		catalogSongs:   make(map[string]catalogSong),
 	}
 }
 
@@ -638,22 +639,41 @@ func (s *Service) storefrontID(ctx context.Context, user *models.User, devToken 
 	return storefront.Data[0].ID, nil
 }
 
-// populateCatalogURL fills in the share URL for a library song when Apple
-// provides the corresponding catalog ID in its play parameters.
-func (s *Service) populateCatalogURL(ctx context.Context, user *models.User, track *AppleRecentTrack) error {
-	if track == nil || track.Attributes.URL != "" || track.Attributes.PlayParams == nil || track.Attributes.PlayParams.CatalogID == "" {
+// catalogSong is the catalog metadata a library song arrives without. Apple
+// files the same recording under a library id whose attributes carry neither a
+// share URL nor an ISRC.
+type catalogSong struct {
+	url  string
+	isrc string
+}
+
+// populateCatalogMetadata fills in the details a library song arrives without,
+// from the catalog record Apple points at in its play parameters.
+//
+// The URL is what gives a persisted play a real origin URI. The ISRC is what
+// lets MusicBrainz identify the recording outright; without it a lookup falls
+// back to matching on title, artist and duration, which resolves the wrong
+// recording for any song whose title another artist also used.
+func (s *Service) populateCatalogMetadata(ctx context.Context, user *models.User, track *AppleRecentTrack) error {
+	if track == nil || track.Attributes.PlayParams == nil {
 		return nil
 	}
 
 	catalogID := track.Attributes.PlayParams.CatalogID
+	needURL := track.Attributes.URL == ""
+	needISRC := track.Attributes.Isrc == nil || *track.Attributes.Isrc == ""
+	// A catalog song already reports both, so it costs no request at all.
+	if catalogID == "" || (!needURL && !needISRC) {
+		return nil
+	}
 
 	// The window largely repeats between ticks, so caching keeps the scan at
 	// roughly zero extra requests in the steady state.
 	s.mu.RLock()
-	cachedURL, ok := s.catalogURLs[catalogID]
+	cached, ok := s.catalogSongs[catalogID]
 	s.mu.RUnlock()
 	if ok {
-		track.Attributes.URL = cachedURL
+		applyCatalogSong(track, cached)
 		return nil
 	}
 
@@ -691,32 +711,56 @@ func (s *Service) populateCatalogURL(ctx context.Context, user *models.User, tra
 	var catalog struct {
 		Data []struct {
 			Attributes struct {
-				URL string `json:"url"`
+				URL  string `json:"url"`
+				ISRC string `json:"isrc"`
 			} `json:"attributes"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(catalogBody, &catalog); err != nil {
 		return fmt.Errorf("failed to decode catalog song response: %w", err)
 	}
-	if len(catalog.Data) == 0 || catalog.Data[0].Attributes.URL == "" {
-		return errors.New("Apple Music catalog response contained no song URL")
+	if len(catalog.Data) == 0 {
+		return errors.New("Apple Music catalog response contained no song")
 	}
 
-	track.Attributes.URL = catalog.Data[0].Attributes.URL
+	song := catalogSong{
+		url:  catalog.Data[0].Attributes.URL,
+		isrc: catalog.Data[0].Attributes.ISRC,
+	}
+	applyCatalogSong(track, song)
 
 	s.mu.Lock()
-	if s.catalogURLs == nil {
-		s.catalogURLs = make(map[string]string)
+	if s.catalogSongs == nil {
+		s.catalogSongs = make(map[string]catalogSong)
 	}
 	// Crude bound: this is a lookup cache, so dropping it wholesale just costs
 	// a few requests on the next poll.
-	if len(s.catalogURLs) >= catalogCacheMax {
-		clear(s.catalogURLs)
+	if len(s.catalogSongs) >= catalogCacheMax {
+		clear(s.catalogSongs)
 	}
-	s.catalogURLs[catalogID] = track.Attributes.URL
+	s.catalogSongs[catalogID] = song
 	s.mu.Unlock()
 
+	// A library song with no catalog URL cannot be given an origin URI, which
+	// is what the caller logs. A missing ISRC is not worth reporting: plenty of
+	// catalog entries genuinely carry none.
+	if needURL && track.Attributes.URL == "" {
+		return errors.New("Apple Music catalog response contained no song URL")
+	}
+
 	return nil
+}
+
+// applyCatalogSong fills in whichever details the play itself did not carry,
+// leaving anything Apple already reported for the play untouched.
+func applyCatalogSong(track *AppleRecentTrack, song catalogSong) {
+	if track.Attributes.URL == "" && song.url != "" {
+		track.Attributes.URL = song.url
+	}
+	if song.isrc != "" && (track.Attributes.Isrc == nil || *track.Attributes.Isrc == "") {
+		isrc := song.isrc
+		track.Attributes.Isrc = &isrc
+	}
 }
 
 // ProcessUser ingests every Apple Music play that has appeared since the last
@@ -819,8 +863,8 @@ func (s *Service) newSince(ctx context.Context, user *models.User, items []Apple
 			return nil
 		}
 		if needURLs {
-			if err := s.populateCatalogURL(ctx, user, &items[i]); err != nil {
-				s.logger.Printf("failed to resolve Apple Music catalog URL for %q: %v", items[i].Attributes.Name, err)
+			if err := s.populateCatalogMetadata(ctx, user, &items[i]); err != nil {
+				s.logger.Printf("failed to resolve Apple Music catalog metadata for %q: %v", items[i].Attributes.Name, err)
 			}
 		}
 		window[i] = identify(&items[i])
@@ -895,11 +939,11 @@ func batchTimestamps(items []AppleRecentTrack, lastTrack *models.Track) []time.T
 // ingest persists one play and submits it to the user's PDS. It returns nil
 // when the entry carried no usable metadata.
 func (s *Service) ingest(ctx context.Context, user *models.User, item AppleRecentTrack, playedAt time.Time) (*models.Track, error) {
-	// Library songs arrive without a share URL. Resolve it here so the play we
-	// persist carries a real origin URI. This is a no-op when the scan already
-	// resolved it.
-	if err := s.populateCatalogURL(ctx, user, &item); err != nil {
-		s.logger.Printf("failed to resolve Apple Music catalog URL for %q: %v", item.Attributes.Name, err)
+	// Library songs arrive without a share URL or an ISRC. Resolve them here so
+	// the play we persist carries a real origin URI and MusicBrainz can identify
+	// the recording outright. This is a no-op when the scan already resolved it.
+	if err := s.populateCatalogMetadata(ctx, user, &item); err != nil {
+		s.logger.Printf("failed to resolve Apple Music catalog metadata for %q: %v", item.Attributes.Name, err)
 	}
 
 	track := s.toTrack(item, playedAt)
