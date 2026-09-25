@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -445,7 +446,9 @@ func TestProcessUserFirstSyncTakesNewestOnly(t *testing.T) {
 	}
 }
 
-func TestProcessUserTakesWholeWindowWhenHistoryDiverges(t *testing.T) {
+func TestProcessUserTakesNewestOnlyWhenHistoryDiverges(t *testing.T) {
+	// A window that lines up with nothing may just mean our history does not
+	// mirror Apple's, so it must not be republished wholesale.
 	env := newProcessUserTestEnv(t, recentTracksJSON("C", "B", "A"))
 	env.seedCatalogTracks(t, "Y", "Z")
 
@@ -454,7 +457,54 @@ func TestProcessUserTakesWholeWindowWhenHistoryDiverges(t *testing.T) {
 	}
 
 	got := env.storedNames(t)
-	want := []string{"C", "B", "A", "Y", "Z"}
+	want := []string{"C", "Y", "Z"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("stored tracks (newest-first) = %v, want %v", got, want)
+	}
+}
+
+func TestProcessUserIgnoresDivergedWindowWhenNewestIsStored(t *testing.T) {
+	// History that skipped a play (B) never lines up, but its newest row is
+	// still Apple's newest entry, so there is nothing to record.
+	env := newProcessUserTestEnv(t, recentTracksJSON("A", "B", "Z"))
+	env.seedCatalogTracks(t, "A", "Z", "Y")
+
+	if err := env.svc.ProcessUser(context.Background(), env.user); err != nil {
+		t.Fatalf("ProcessUser returned error: %v", err)
+	}
+
+	if got := env.trackCount(t); got != 3 {
+		t.Errorf("expected 3 tracks (nothing new), got %d", got)
+	}
+}
+
+func TestProcessUserBackfillDoesNotInterleaveWithRecentHistory(t *testing.T) {
+	// Backdating a batch by its durations would reach past plays saved moments
+	// ago. Interleaved with them, history no longer mirrors Apple's window, so
+	// every later tick would misalign and republish it.
+	env := newProcessUserTestEnv(t, recentTracksJSON("D", "C", "B", "A", "Z"))
+	for i, name := range []string{"Z", "A"} {
+		_, err := env.testDB.SaveTrack(env.user.ID, db.SourceAppleMusic, &models.Track{
+			Name:           name,
+			Artist:         []models.Artist{{Name: name + " Artist"}},
+			URL:            catalogURL(name),
+			SourceID:       resourceID(name),
+			ServiceBaseUrl: "music.apple.com",
+			Timestamp:      time.Now().UTC().Add(time.Duration(i-2) * time.Minute),
+		})
+		if err != nil {
+			t.Fatalf("failed to seed track %q: %v", name, err)
+		}
+	}
+
+	for range 2 {
+		if err := env.svc.ProcessUser(context.Background(), env.user); err != nil {
+			t.Fatalf("ProcessUser returned error: %v", err)
+		}
+	}
+
+	got := env.storedNames(t)
+	want := []string{"D", "C", "B", "A", "Z"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("stored tracks (newest-first) = %v, want %v", got, want)
 	}
@@ -706,6 +756,53 @@ func TestProcessUserMatchesLegacyRowsByURL(t *testing.T) {
 	}
 }
 
+func TestProcessUserSkipsTickWhenLegacyURLCannotBeResolved(t *testing.T) {
+	// Without its catalog URL a library song cannot match a legacy row, and
+	// aligning anyway would treat already-stored plays as new.
+	testDB := newTestDB(t)
+	user := createTestUser(t, testDB)
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path == "/v1/me/recent/played/tracks" {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Status:     "200 OK",
+				Body:       io.NopCloser(strings.NewReader(librarySongsJSON("New", "Song"))),
+				Header:     make(http.Header),
+			}, nil
+		}
+		return &http.Response{
+			StatusCode: http.StatusTooManyRequests,
+			Status:     "429 Too Many Requests",
+			Body:       io.NopCloser(strings.NewReader("")),
+			Header:     make(http.Header),
+		}, nil
+	})
+	svc := newTestService(t, testDB, transport)
+
+	if _, err := testDB.SaveTrack(user.ID, db.SourceAppleMusic, &models.Track{
+		Name:           "Song",
+		Artist:         []models.Artist{{Name: "Song Artist"}},
+		URL:            "https://music.apple.com/us/song/x/1",
+		ServiceBaseUrl: "music.apple.com",
+		Timestamp:      time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("failed to seed track: %v", err)
+	}
+
+	var apiErr *apiError
+	if err := svc.ProcessUser(context.Background(), user); !errors.As(err, &apiErr) {
+		t.Fatalf("ProcessUser error = %v, want the API error so the user backs off", err)
+	}
+
+	tracks, err := testDB.GetRecentTracksForService(user.ID, db.SourceAppleMusic, 100)
+	if err != nil {
+		t.Fatalf("failed to read tracks: %v", err)
+	}
+	if len(tracks) != 1 {
+		t.Errorf("expected nothing saved on a failed tick (1 track), got %d", len(tracks))
+	}
+}
+
 func identitiesOf(ids ...string) []itemIdentity {
 	out := make([]itemIdentity, len(ids))
 	for i, id := range ids {
@@ -728,18 +825,20 @@ func TestAlignmentOffset(t *testing.T) {
 		window  []itemIdentity
 		history []*models.Track
 		want    int
+		wantOK  bool
 	}{
-		{"nothing new", identitiesOf("a", "b"), historyOf("a", "b"), 0},
-		{"one new", identitiesOf("c", "a", "b"), historyOf("a", "b"), 1},
-		{"repeat after another track", identitiesOf("a", "b", "a", "z"), historyOf("a", "z"), 2},
-		{"no overlap", identitiesOf("c", "b"), historyOf("y", "z"), 2},
-		{"history shorter than window", identitiesOf("c", "b", "a"), historyOf("a"), 2},
+		{"nothing new", identitiesOf("a", "b"), historyOf("a", "b"), 0, true},
+		{"one new", identitiesOf("c", "a", "b"), historyOf("a", "b"), 1, true},
+		{"repeat after another track", identitiesOf("a", "b", "a", "z"), historyOf("a", "z"), 2, true},
+		{"no overlap", identitiesOf("c", "b"), historyOf("y", "z"), 0, false},
+		{"history shorter than window", identitiesOf("c", "b", "a"), historyOf("a"), 2, true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := alignmentOffset(tt.window, tt.history); got != tt.want {
-				t.Errorf("alignmentOffset() = %d, want %d", got, tt.want)
+			got, ok := alignmentOffset(tt.window, tt.history)
+			if got != tt.want || ok != tt.wantOK {
+				t.Errorf("alignmentOffset() = %d, %t, want %d, %t", got, ok, tt.want, tt.wantOK)
 			}
 		})
 	}
@@ -750,8 +849,8 @@ func TestAlignmentOffsetFallsBackToURLForLegacyRows(t *testing.T) {
 	window := identitiesOf("a", "b")
 	history := []*models.Track{{URL: "url:a"}, {URL: "url:b"}}
 
-	if got := alignmentOffset(window, history); got != 0 {
-		t.Errorf("alignmentOffset() = %d, want 0 (legacy rows matched on URL)", got)
+	if got, ok := alignmentOffset(window, history); got != 0 || !ok {
+		t.Errorf("alignmentOffset() = %d, %t, want 0, true (legacy rows matched on URL)", got, ok)
 	}
 }
 

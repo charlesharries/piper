@@ -790,15 +790,13 @@ func (s *Service) ProcessUser(ctx context.Context, user *models.User) error {
 		return fmt.Errorf("reading stored apple music tracks for user %d: %w", user.ID, err)
 	}
 
-	newItems := s.newSince(ctx, user, items, stored)
+	newItems, err := s.newSince(ctx, user, items, stored)
+	if err != nil {
+		return err
+	}
 	if len(newItems) == 0 {
 		s.expireNowPlaying(ctx, user.ID)
 		return nil
-	}
-	if len(stored) > 0 && len(newItems) == len(items) {
-		s.logger.Printf(
-			"user %d: stored history does not line up with the %d-track window; earlier plays may have been missed",
-			user.ID, len(items))
 	}
 
 	var lastTrack *models.Track
@@ -838,12 +836,15 @@ func (s *Service) ProcessUser(ctx context.Context, user *models.User) error {
 // So we align sequences: find the smallest offset at which the remainder of
 // Apple's window lines up with the history we already hold. That offset is
 // exactly how many plays are new, and it handles repeats without duplicating.
-func (s *Service) newSince(ctx context.Context, user *models.User, items []AppleRecentTrack, stored []*models.Track) []AppleRecentTrack {
+//
+// It fails rather than guess when a library song's catalog URL cannot be
+// resolved, since matching that entry on anything else would misalign it.
+func (s *Service) newSince(ctx context.Context, user *models.User, items []AppleRecentTrack, stored []*models.Track) ([]AppleRecentTrack, error) {
 	// First sync for this user: take only the newest play to establish a
 	// cursor. Backfilling the whole window here would publish a batch of
 	// historical plays to their PDS with timestamps we invented.
 	if len(stored) == 0 {
-		return items[:1]
+		return items[:1], nil
 	}
 
 	// Rows saved before source_id existed can only be matched on their URL, and
@@ -859,30 +860,45 @@ func (s *Service) newSince(ctx context.Context, user *models.User, items []Apple
 
 	window := make([]itemIdentity, len(items))
 	for i := range items {
-		if ctx.Err() != nil {
-			return nil
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
 		if needURLs {
 			if err := s.populateCatalogMetadata(ctx, user, &items[i]); err != nil {
-				s.logger.Printf("failed to resolve Apple Music catalog metadata for %q: %v", items[i].Attributes.Name, err)
+				return nil, fmt.Errorf("resolving catalog metadata for %q: %w", items[i].Attributes.Name, err)
 			}
 		}
 		window[i] = identify(&items[i])
 	}
 
-	return items[:alignmentOffset(window, stored)]
+	offset, ok := alignmentOffset(window, stored)
+	if ok {
+		return items[:offset], nil
+	}
+
+	// Nothing lines up, either because more plays happened than the window
+	// holds or because our history does not mirror Apple's. We cannot tell
+	// which, and treating the whole window as new would republish every play
+	// in it on the second case, so fall back to the newest play alone.
+	s.logger.Printf(
+		"user %d: stored history does not line up with the %d-track window; earlier plays may have been missed",
+		user.ID, len(items))
+	if window[0].matches(stored[0]) {
+		return nil, nil
+	}
+	return items[:1], nil
 }
 
 // alignmentOffset returns how many entries at the head of window are new, by
 // finding the smallest offset at which the rest of window matches the start of
-// history. A window that matches nothing is treated as entirely new.
-func alignmentOffset(window []itemIdentity, history []*models.Track) int {
+// history. It reports false when no offset matches.
+func alignmentOffset(window []itemIdentity, history []*models.Track) (int, bool) {
 	for offset := range window {
 		if matchesHistory(window[offset:], history) {
-			return offset
+			return offset, true
 		}
 	}
-	return len(window)
+	return 0, false
 }
 
 // matchesHistory reports whether tail is a prefix of history, comparing over
@@ -906,25 +922,20 @@ func matchesHistory(tail []itemIdentity, history []*models.Track) bool {
 }
 
 // batchTimestamps synthesises a played-at for each entry of a newest-first
-// batch. Apple gives us none, and the watermark query orders by timestamp, so
-// these have to be strictly increasing in play order or the cursor breaks.
+// batch. Apple gives us none, and the history the cursor aligns against is
+// read in timestamp order, so every stamp has to be strictly increasing in play
+// order and later than lastTrack. A batch that reached back past lastTrack
+// would interleave with the stored rows, and the next tick's alignment would
+// then fail against a history that no longer mirrors Apple's.
 //
-// The newest entry is taken as "now" and each older entry is backdated by its
-// own duration, which is what back-to-back playback would have looked like.
-// Entries may therefore predate lastTrack; that is honest (they were played
-// before we noticed) and harmless, since the cursor only reads the newest row.
+// Each entry is backdated from the one after it by its own duration, starting
+// from "now", which is what back-to-back playback would have looked like, and
+// then pushed forward where needed to stay clear of whatever precedes it.
 func batchTimestamps(items []AppleRecentTrack, lastTrack *models.Track) []time.Time {
-	base := time.Now().UTC()
-	// Guarantee the batch outranks the existing watermark even if the previous
-	// save landed in the same second.
-	if lastTrack != nil && !base.After(lastTrack.Timestamp) {
-		base = lastTrack.Timestamp.Add(time.Second)
-	}
-
 	stamps := make([]time.Time, len(items))
 	for i := range items {
 		if i == 0 {
-			stamps[i] = base
+			stamps[i] = time.Now().UTC()
 			continue
 		}
 		gap := time.Second
@@ -932,6 +943,17 @@ func batchTimestamps(items []AppleRecentTrack, lastTrack *models.Track) []time.T
 			gap = time.Duration(*d) * time.Millisecond
 		}
 		stamps[i] = stamps[i-1].Add(-gap)
+	}
+
+	var floor time.Time
+	if lastTrack != nil {
+		floor = lastTrack.Timestamp
+	}
+	for i := len(stamps) - 1; i >= 0; i-- {
+		if !stamps[i].After(floor) {
+			stamps[i] = floor.Add(time.Second)
+		}
+		floor = stamps[i]
 	}
 	return stamps
 }
