@@ -803,6 +803,101 @@ func TestProcessUserSkipsTickWhenLegacyURLCannotBeResolved(t *testing.T) {
 	}
 }
 
+// catalogTransport serves a recently-played response and resolves each catalog
+// id to its own URL, except those in missing, for which the catalog holds no
+// song. It counts catalog requests per id.
+type catalogTransport struct {
+	recent   string
+	missing  []string
+	requests map[string]int
+}
+
+func (t *catalogTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	body := `{"data":[]}`
+	switch req.URL.Path {
+	case "/v1/me/recent/played/tracks":
+		body = t.recent
+	case "/v1/me/storefront":
+		body = `{"data":[{"id":"us"}]}`
+	default:
+		id := req.URL.Query().Get("ids")
+		if t.requests == nil {
+			t.requests = make(map[string]int)
+		}
+		t.requests[id]++
+		if !slices.Contains(t.missing, id) {
+			body = fmt.Sprintf(`{"data":[{"attributes":{"url":"https://music.apple.com/us/song/%s"}}]}`, id)
+		}
+	}
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Status:     "200 OK",
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Header:     make(http.Header),
+	}, nil
+}
+
+func TestProcessUserAlignsPastSongMissingFromCatalog(t *testing.T) {
+	// A pulled song never gets a catalog URL, so it must not stall the tick
+	// while a legacy row still forces URL matching.
+	testDB := newTestDB(t)
+	user := createTestUser(t, testDB)
+	transport := &catalogTransport{
+		recent:  librarySongsJSON("New", "Gone", "Song"),
+		missing: []string{"cat.Gone"},
+	}
+	svc := newTestService(t, testDB, transport)
+
+	if _, err := testDB.SaveTrack(user.ID, db.SourceAppleMusic, &models.Track{
+		Name:           "Song",
+		Artist:         []models.Artist{{Name: "Song Artist"}},
+		URL:            "https://music.apple.com/us/song/cat.Song",
+		ServiceBaseUrl: "music.apple.com",
+		Timestamp:      time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("failed to seed track: %v", err)
+	}
+
+	if err := svc.ProcessUser(context.Background(), user); err != nil {
+		t.Fatalf("ProcessUser returned error: %v", err)
+	}
+
+	tracks, err := testDB.GetRecentTracksForService(user.ID, db.SourceAppleMusic, 100)
+	if err != nil {
+		t.Fatalf("failed to read tracks: %v", err)
+	}
+	var names []string
+	for _, track := range tracks {
+		names = append(names, track.Name)
+	}
+	if got := strings.Join(names, ","); got != "New,Gone,Song" {
+		t.Errorf("stored tracks = %q, want New,Gone,Song", got)
+	}
+}
+
+func TestPopulateCatalogMetadataRemembersMissingSong(t *testing.T) {
+	testDB := newTestDB(t)
+	user := createTestUser(t, testDB)
+	transport := &catalogTransport{missing: []string{"cat.Gone"}}
+	svc := newTestService(t, testDB, transport)
+
+	var items struct{ Data []AppleRecentTrack }
+	if err := json.Unmarshal([]byte(librarySongsJSON("Gone")), &items); err != nil {
+		t.Fatalf("failed to decode tracks: %v", err)
+	}
+
+	for range 2 {
+		track := items.Data[0]
+		if err := svc.populateCatalogMetadata(context.Background(), user, &track); !errors.Is(err, errNoCatalogSong) {
+			t.Fatalf("populateCatalogMetadata error = %v, want errNoCatalogSong", err)
+		}
+	}
+
+	if got := transport.requests["cat.Gone"]; got != 1 {
+		t.Errorf("catalog requested %d times, want 1", got)
+	}
+}
+
 func identitiesOf(ids ...string) []itemIdentity {
 	out := make([]itemIdentity, len(ids))
 	for i, id := range ids {
