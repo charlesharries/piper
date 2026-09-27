@@ -38,6 +38,12 @@ const (
 	// missed during downtime.
 	recentWindow = 25
 
+	// alignmentDepth is how many of the newest stored plays must line up with
+	// Apple's window to fix where new plays start. Enough to tell a repeated
+	// run of up to four songs apart; few enough that a bad row or a gap in
+	// older history stops mattering after that many plays.
+	alignmentDepth = 5
+
 	// apiMaxAttempts bounds how many times a single Apple API read is tried.
 	// Reads are idempotent, so retrying a transient failure is always safe.
 	apiMaxAttempts   = 3
@@ -57,16 +63,7 @@ const (
 	// catalogCacheMax bounds the library-song catalog cache in a long-lived
 	// process.
 	catalogCacheMax = 1024
-
-	// catalogMissTTL is how long a catalog id Apple reported no song for is
-	// remembered, so a pulled song is not requested again on every tick.
-	catalogMissTTL = 6 * time.Hour
 )
-
-// errNoCatalogSong reports that Apple's catalog holds no song for a library
-// song's catalog id, typically because it was pulled or is unavailable in the
-// user's storefront. Unlike a failed request, retrying will not help.
-var errNoCatalogSong = errors.New("Apple Music catalog response contained no song")
 
 // syncState tracks per-user failure backoff between ticks.
 type syncState struct {
@@ -111,11 +108,10 @@ type Service struct {
 
 	// per-user sync bookkeeping, guarded by mu. Accessed through helpers that
 	// initialise lazily, since Service is also constructed as a literal.
-	syncStates    map[int64]*syncState
-	nowPlaying    map[int64]*nowPlayingState
-	storefronts   map[int64]string
-	catalogSongs  map[string]catalogSong
-	catalogMisses map[string]time.Time // catalog id -> when to ask again
+	syncStates   map[int64]*syncState
+	nowPlaying   map[int64]*nowPlayingState
+	storefronts  map[int64]string
+	catalogSongs map[string]catalogSong
 }
 
 func NewService(teamID, keyID, privateKeyPath string) *Service {
@@ -129,7 +125,6 @@ func NewService(teamID, keyID, privateKeyPath string) *Service {
 		nowPlaying:     make(map[int64]*nowPlayingState),
 		storefronts:    make(map[int64]string),
 		catalogSongs:   make(map[string]catalogSong),
-		catalogMisses:  make(map[string]time.Time),
 	}
 }
 
@@ -545,29 +540,7 @@ func appleResourceID(t *AppleRecentTrack) string {
 	return generateUploadHash(t)
 }
 
-// itemIdentity carries both identities a stored row might have been written
-// with, so the cursor keeps working across rows saved before and after
-// source_id existed.
-type itemIdentity struct {
-	sourceID string
-	url      string
-}
-
-func identify(t *AppleRecentTrack) itemIdentity {
-	return itemIdentity{sourceID: appleResourceID(t), url: trackKey(t)}
-}
-
-// matches reports whether a stored row refers to this play. Rows written before
-// source_id existed can only be compared on their URL.
-func (k itemIdentity) matches(stored *models.Track) bool {
-	if stored.SourceID != "" {
-		return stored.SourceID == k.sourceID
-	}
-	return stored.URL == k.url
-}
-
-// toTrack converts AppleRecentTrack to internal models.Track. It takes the poll
-// cycle's context and user because it hydrates against MusicBrainz. playedAt is
+// toTrack converts AppleRecentTrack to internal models.Track. playedAt is
 // synthesised by the caller: Apple's recently-played endpoint returns no
 // played-at timestamp of its own.
 func (s *Service) toTrack(ctx context.Context, userID int64, t AppleRecentTrack, playedAt time.Time) *models.Track {
@@ -682,18 +655,13 @@ func (s *Service) populateCatalogMetadata(ctx context.Context, user *models.User
 		return nil
 	}
 
-	// The window largely repeats between ticks, so caching keeps the scan at
-	// roughly zero extra requests in the steady state.
+	// Songs get played again, so caching saves a request on every repeat.
 	s.mu.RLock()
 	cached, ok := s.catalogSongs[catalogID]
-	retryAt, missed := s.catalogMisses[catalogID]
 	s.mu.RUnlock()
 	if ok {
 		applyCatalogSong(track, cached)
 		return nil
-	}
-	if missed && time.Now().Before(retryAt) {
-		return errNoCatalogSong
 	}
 
 	devToken, _, err := s.GenerateDeveloperToken()
@@ -739,18 +707,7 @@ func (s *Service) populateCatalogMetadata(ctx context.Context, user *models.User
 		return fmt.Errorf("failed to decode catalog song response: %w", err)
 	}
 	if len(catalog.Data) == 0 {
-		s.logger.Printf("catalog id %s for %q has no Apple Music catalog song; not asking again for %s",
-			catalogID, track.Attributes.Name, catalogMissTTL)
-		s.mu.Lock()
-		if s.catalogMisses == nil {
-			s.catalogMisses = make(map[string]time.Time)
-		}
-		if len(s.catalogMisses) >= catalogCacheMax {
-			clear(s.catalogMisses)
-		}
-		s.catalogMisses[catalogID] = time.Now().Add(catalogMissTTL)
-		s.mu.Unlock()
-		return errNoCatalogSong
+		return errors.New("Apple Music catalog response contained no song")
 	}
 
 	song := catalogSong{
@@ -813,17 +770,14 @@ func (s *Service) ProcessUser(ctx context.Context, user *models.User) error {
 		return nil
 	}
 
-	stored, err := s.DB.GetRecentTracksForService(user.ID, db.SourceAppleMusic, recentWindow)
+	stored, err := s.DB.GetRecentTracksForService(user.ID, db.SourceAppleMusic, alignmentDepth)
 	if err != nil {
 		// Without our own history we cannot tell new plays from old ones, and
 		// guessing would duplicate the whole window.
 		return fmt.Errorf("reading stored apple music tracks for user %d: %w", user.ID, err)
 	}
 
-	newItems, err := s.newSince(ctx, user, items, stored)
-	if err != nil {
-		return err
-	}
+	newItems := s.newSince(user.ID, items, stored)
 	if len(newItems) == 0 {
 		s.expireNowPlaying(ctx, user.ID)
 		return nil
@@ -864,50 +818,28 @@ func (s *Service) ProcessUser(ctx context.Context, user *models.User) error {
 // track is still in it.
 //
 // So we align sequences: find the smallest offset at which the remainder of
-// Apple's window lines up with the history we already hold. That offset is
-// exactly how many plays are new, and it handles repeats without duplicating.
+// Apple's window lines up with the newest plays we hold. That offset is exactly
+// how many plays are new, and it handles repeats without duplicating.
 //
-// It fails rather than guess when a library song's catalog URL cannot be
-// looked up, since matching that entry on anything else would misalign it. A
-// song the catalog has no record of is different: no URL is ever coming, and
-// failing would stall the user until it left the window, so it is matched on
-// its resource id alone.
-func (s *Service) newSince(ctx context.Context, user *models.User, items []AppleRecentTrack, stored []*models.Track) ([]AppleRecentTrack, error) {
+// stored holds at most alignmentDepth rows, newest-first. Plays are matched on
+// Apple's resource id alone, so a row saved before source_id existed matches
+// nothing and simply ages out.
+func (s *Service) newSince(userID int64, items []AppleRecentTrack, stored []*models.Track) []AppleRecentTrack {
 	// First sync for this user: take only the newest play to establish a
 	// cursor. Backfilling the whole window here would publish a batch of
 	// historical plays to their PDS with timestamps we invented.
 	if len(stored) == 0 {
-		return items[:1], nil
+		return items[:1]
 	}
 
-	// Rows saved before source_id existed can only be matched on their URL, and
-	// for a library song that means resolving its catalog URL first. Once those
-	// rows age out of the window this round trip disappears entirely.
-	needURLs := false
-	for _, track := range stored {
-		if track.SourceID == "" {
-			needURLs = true
-			break
-		}
-	}
-
-	window := make([]itemIdentity, len(items))
+	window := make([]string, len(items))
 	for i := range items {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		if needURLs {
-			err := s.populateCatalogMetadata(ctx, user, &items[i])
-			if err != nil && !errors.Is(err, errNoCatalogSong) {
-				return nil, fmt.Errorf("resolving catalog metadata for %q: %w", items[i].Attributes.Name, err)
-			}
-		}
-		window[i] = identify(&items[i])
+		window[i] = appleResourceID(&items[i])
 	}
 
 	offset, ok := alignmentOffset(window, stored)
 	if ok {
-		return items[:offset], nil
+		return items[:offset]
 	}
 
 	// Nothing lines up, either because more plays happened than the window
@@ -915,18 +847,18 @@ func (s *Service) newSince(ctx context.Context, user *models.User, items []Apple
 	// which, and treating the whole window as new would republish every play
 	// in it on the second case, so fall back to the newest play alone.
 	s.logger.Printf(
-		"user %d: stored history does not line up with the %d-track window; earlier plays may have been missed",
-		user.ID, len(items))
-	if window[0].matches(stored[0]) {
-		return nil, nil
+		"user %d: newest %d stored plays do not line up with the %d-track window; earlier plays may have been missed",
+		userID, len(stored), len(items))
+	if window[0] == stored[0].SourceID {
+		return nil
 	}
-	return items[:1], nil
+	return items[:1]
 }
 
 // alignmentOffset returns how many entries at the head of window are new, by
 // finding the smallest offset at which the rest of window matches the start of
 // history. It reports false when no offset matches.
-func alignmentOffset(window []itemIdentity, history []*models.Track) (int, bool) {
+func alignmentOffset(window []string, history []*models.Track) (int, bool) {
 	for offset := range window {
 		if matchesHistory(window[offset:], history) {
 			return offset, true
@@ -942,13 +874,13 @@ func alignmentOffset(window []itemIdentity, history []*models.Track) (int, bool)
 // stored row, a window of A B A matches at offset 0 as readily as at offset 2,
 // so an immediate repeat right after a user's first ever sync is missed once.
 // Every later poll has enough history to disambiguate.
-func matchesHistory(tail []itemIdentity, history []*models.Track) bool {
+func matchesHistory(tail []string, history []*models.Track) bool {
 	n := min(len(tail), len(history))
 	if n == 0 {
 		return false
 	}
 	for i := range n {
-		if !tail[i].matches(history[i]) {
+		if tail[i] != history[i].SourceID {
 			return false
 		}
 	}
@@ -997,7 +929,7 @@ func batchTimestamps(items []AppleRecentTrack, lastTrack *models.Track) []time.T
 func (s *Service) ingest(ctx context.Context, user *models.User, item AppleRecentTrack, playedAt time.Time) (*models.Track, error) {
 	// Library songs arrive without a share URL or an ISRC. Resolve them here so
 	// the play we persist carries a real origin URI and MusicBrainz can identify
-	// the recording outright. This is a no-op when the scan already resolved it.
+	// the recording outright.
 	if err := s.populateCatalogMetadata(ctx, user, &item); err != nil {
 		s.logger.Printf("failed to resolve Apple Music catalog metadata for %q: %v", item.Attributes.Name, err)
 	}
