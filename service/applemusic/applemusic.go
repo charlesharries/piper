@@ -57,7 +57,16 @@ const (
 	// catalogCacheMax bounds the library-song catalog cache in a long-lived
 	// process.
 	catalogCacheMax = 1024
+
+	// catalogMissTTL is how long a catalog id Apple reported no song for is
+	// remembered, so a pulled song is not requested again on every tick.
+	catalogMissTTL = 6 * time.Hour
 )
+
+// errNoCatalogSong reports that Apple's catalog holds no song for a library
+// song's catalog id, typically because it was pulled or is unavailable in the
+// user's storefront. Unlike a failed request, retrying will not help.
+var errNoCatalogSong = errors.New("Apple Music catalog response contained no song")
 
 // syncState tracks per-user failure backoff between ticks.
 type syncState struct {
@@ -102,10 +111,11 @@ type Service struct {
 
 	// per-user sync bookkeeping, guarded by mu. Accessed through helpers that
 	// initialise lazily, since Service is also constructed as a literal.
-	syncStates   map[int64]*syncState
-	nowPlaying   map[int64]*nowPlayingState
-	storefronts  map[int64]string
-	catalogSongs map[string]catalogSong
+	syncStates    map[int64]*syncState
+	nowPlaying    map[int64]*nowPlayingState
+	storefronts   map[int64]string
+	catalogSongs  map[string]catalogSong
+	catalogMisses map[string]time.Time // catalog id -> when to ask again
 }
 
 func NewService(teamID, keyID, privateKeyPath string) *Service {
@@ -119,6 +129,7 @@ func NewService(teamID, keyID, privateKeyPath string) *Service {
 		nowPlaying:     make(map[int64]*nowPlayingState),
 		storefronts:    make(map[int64]string),
 		catalogSongs:   make(map[string]catalogSong),
+		catalogMisses:  make(map[string]time.Time),
 	}
 }
 
@@ -675,10 +686,14 @@ func (s *Service) populateCatalogMetadata(ctx context.Context, user *models.User
 	// roughly zero extra requests in the steady state.
 	s.mu.RLock()
 	cached, ok := s.catalogSongs[catalogID]
+	retryAt, missed := s.catalogMisses[catalogID]
 	s.mu.RUnlock()
 	if ok {
 		applyCatalogSong(track, cached)
 		return nil
+	}
+	if missed && time.Now().Before(retryAt) {
+		return errNoCatalogSong
 	}
 
 	devToken, _, err := s.GenerateDeveloperToken()
@@ -724,7 +739,18 @@ func (s *Service) populateCatalogMetadata(ctx context.Context, user *models.User
 		return fmt.Errorf("failed to decode catalog song response: %w", err)
 	}
 	if len(catalog.Data) == 0 {
-		return errors.New("Apple Music catalog response contained no song")
+		s.logger.Printf("catalog id %s for %q has no Apple Music catalog song; not asking again for %s",
+			catalogID, track.Attributes.Name, catalogMissTTL)
+		s.mu.Lock()
+		if s.catalogMisses == nil {
+			s.catalogMisses = make(map[string]time.Time)
+		}
+		if len(s.catalogMisses) >= catalogCacheMax {
+			clear(s.catalogMisses)
+		}
+		s.catalogMisses[catalogID] = time.Now().Add(catalogMissTTL)
+		s.mu.Unlock()
+		return errNoCatalogSong
 	}
 
 	song := catalogSong{
@@ -842,7 +868,10 @@ func (s *Service) ProcessUser(ctx context.Context, user *models.User) error {
 // exactly how many plays are new, and it handles repeats without duplicating.
 //
 // It fails rather than guess when a library song's catalog URL cannot be
-// resolved, since matching that entry on anything else would misalign it.
+// looked up, since matching that entry on anything else would misalign it. A
+// song the catalog has no record of is different: no URL is ever coming, and
+// failing would stall the user until it left the window, so it is matched on
+// its resource id alone.
 func (s *Service) newSince(ctx context.Context, user *models.User, items []AppleRecentTrack, stored []*models.Track) ([]AppleRecentTrack, error) {
 	// First sync for this user: take only the newest play to establish a
 	// cursor. Backfilling the whole window here would publish a batch of
@@ -868,7 +897,8 @@ func (s *Service) newSince(ctx context.Context, user *models.User, items []Apple
 			return nil, err
 		}
 		if needURLs {
-			if err := s.populateCatalogMetadata(ctx, user, &items[i]); err != nil {
+			err := s.populateCatalogMetadata(ctx, user, &items[i])
+			if err != nil && !errors.Is(err, errNoCatalogSong) {
 				return nil, fmt.Errorf("resolving catalog metadata for %q: %w", items[i].Attributes.Name, err)
 			}
 		}
