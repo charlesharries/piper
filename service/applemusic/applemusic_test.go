@@ -4,12 +4,10 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -693,13 +691,14 @@ func (t *countingTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	}, nil
 }
 
-func TestProcessUserSkipsCatalogLookupWhenHistoryHasResourceIDs(t *testing.T) {
+func TestProcessUserAlignsWithoutCatalogLookups(t *testing.T) {
+	// Alignment compares resource ids, which library songs carry, so a tick
+	// with nothing new costs no catalog request.
 	testDB := newTestDB(t)
 	user := createTestUser(t, testDB)
 	transport := &countingTransport{recent: librarySongsJSON("Song")}
 	svc := newTestService(t, testDB, transport)
 
-	// A row carrying the resource id, as ingest now writes it.
 	if _, err := testDB.SaveTrack(user.ID, db.SourceAppleMusic, &models.Track{
 		Name:           "Song",
 		Artist:         []models.Artist{{Name: "Song Artist"}},
@@ -721,195 +720,52 @@ func TestProcessUserSkipsCatalogLookupWhenHistoryHasResourceIDs(t *testing.T) {
 	}
 }
 
-func TestProcessUserMatchesLegacyRowsByURL(t *testing.T) {
-	// A row written before source_id existed: matching it still requires
-	// resolving the library song's catalog URL.
-	testDB := newTestDB(t)
-	user := createTestUser(t, testDB)
-	transport := &countingTransport{recent: librarySongsJSON("Song")}
-	svc := newTestService(t, testDB, transport)
+func TestProcessUserAlignsDespiteBadRowsBeyondDepth(t *testing.T) {
+	// Rows past alignmentDepth that do not mirror Apple's window, such as
+	// duplicates from an earlier bug, must not stop the newest plays aligning.
+	env := newProcessUserTestEnv(t, recentTracksJSON("D", "C", "B", "A", "Z", "Y", "W", "V"))
+	env.seedCatalogTracks(t, "B", "A", "Z", "Y", "W", "Dup", "Dup")
 
-	if _, err := testDB.SaveTrack(user.ID, db.SourceAppleMusic, &models.Track{
-		Name:           "Song",
-		Artist:         []models.Artist{{Name: "Song Artist"}},
-		Album:          "Song Album",
-		URL:            "https://music.apple.com/us/song/x/1",
-		ServiceBaseUrl: "music.apple.com",
-		Timestamp:      time.Now().UTC(),
-	}); err != nil {
-		t.Fatalf("failed to seed track: %v", err)
-	}
-
-	if err := svc.ProcessUser(context.Background(), user); err != nil {
+	if err := env.svc.ProcessUser(context.Background(), env.user); err != nil {
 		t.Fatalf("ProcessUser returned error: %v", err)
 	}
 
-	tracks, err := testDB.GetRecentTracksForService(user.ID, db.SourceAppleMusic, 100)
-	if err != nil {
-		t.Fatalf("failed to read tracks: %v", err)
-	}
-	if len(tracks) != 1 {
-		t.Errorf("expected the legacy row to match (1 track), got %d", len(tracks))
-	}
-	if !slices.Contains(transport.paths, "/v1/me/storefront") {
-		t.Errorf("expected a storefront lookup to resolve the legacy URL, got %v", transport.paths)
+	got := env.storedNames(t)
+	want := []string{"D", "C", "B", "A", "Z", "Y", "W", "Dup", "Dup"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("stored tracks (newest-first) = %v, want %v", got, want)
 	}
 }
 
-func TestProcessUserSkipsTickWhenLegacyURLCannotBeResolved(t *testing.T) {
-	// Without its catalog URL a library song cannot match a legacy row, and
-	// aligning anyway would treat already-stored plays as new.
-	testDB := newTestDB(t)
-	user := createTestUser(t, testDB)
-	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		if req.URL.Path == "/v1/me/recent/played/tracks" {
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Status:     "200 OK",
-				Body:       io.NopCloser(strings.NewReader(librarySongsJSON("New", "Song"))),
-				Header:     make(http.Header),
-			}, nil
-		}
-		return &http.Response{
-			StatusCode: http.StatusTooManyRequests,
-			Status:     "429 Too Many Requests",
-			Body:       io.NopCloser(strings.NewReader("")),
-			Header:     make(http.Header),
-		}, nil
-	})
-	svc := newTestService(t, testDB, transport)
-
-	if _, err := testDB.SaveTrack(user.ID, db.SourceAppleMusic, &models.Track{
-		Name:           "Song",
-		Artist:         []models.Artist{{Name: "Song Artist"}},
-		URL:            "https://music.apple.com/us/song/x/1",
+func TestProcessUserMovesPastRowWithoutResourceID(t *testing.T) {
+	// A row saved before source_id existed matches nothing. The newest play is
+	// taken once to give history a resource id, then later ticks align.
+	env := newProcessUserTestEnv(t, recentTracksJSON("A", "Z"))
+	if _, err := env.testDB.SaveTrack(env.user.ID, db.SourceAppleMusic, &models.Track{
+		Name:           "A",
+		Artist:         []models.Artist{{Name: "A Artist"}},
+		URL:            catalogURL("A"),
 		ServiceBaseUrl: "music.apple.com",
-		Timestamp:      time.Now().UTC(),
+		Timestamp:      time.Now().UTC().Add(-time.Hour),
 	}); err != nil {
 		t.Fatalf("failed to seed track: %v", err)
 	}
 
-	var apiErr *apiError
-	if err := svc.ProcessUser(context.Background(), user); !errors.As(err, &apiErr) {
-		t.Fatalf("ProcessUser error = %v, want the API error so the user backs off", err)
-	}
-
-	tracks, err := testDB.GetRecentTracksForService(user.ID, db.SourceAppleMusic, 100)
-	if err != nil {
-		t.Fatalf("failed to read tracks: %v", err)
-	}
-	if len(tracks) != 1 {
-		t.Errorf("expected nothing saved on a failed tick (1 track), got %d", len(tracks))
-	}
-}
-
-// catalogTransport serves a recently-played response and resolves each catalog
-// id to its own URL, except those in missing, for which the catalog holds no
-// song. It counts catalog requests per id.
-type catalogTransport struct {
-	recent   string
-	missing  []string
-	requests map[string]int
-}
-
-func (t *catalogTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	body := `{"data":[]}`
-	switch req.URL.Path {
-	case "/v1/me/recent/played/tracks":
-		body = t.recent
-	case "/v1/me/storefront":
-		body = `{"data":[{"id":"us"}]}`
-	default:
-		id := req.URL.Query().Get("ids")
-		if t.requests == nil {
-			t.requests = make(map[string]int)
-		}
-		t.requests[id]++
-		if !slices.Contains(t.missing, id) {
-			body = fmt.Sprintf(`{"data":[{"attributes":{"url":"https://music.apple.com/us/song/%s"}}]}`, id)
-		}
-	}
-	return &http.Response{
-		StatusCode: http.StatusOK,
-		Status:     "200 OK",
-		Body:       io.NopCloser(strings.NewReader(body)),
-		Header:     make(http.Header),
-	}, nil
-}
-
-func TestProcessUserAlignsPastSongMissingFromCatalog(t *testing.T) {
-	// A pulled song never gets a catalog URL, so it must not stall the tick
-	// while a legacy row still forces URL matching.
-	testDB := newTestDB(t)
-	user := createTestUser(t, testDB)
-	transport := &catalogTransport{
-		recent:  librarySongsJSON("New", "Gone", "Song"),
-		missing: []string{"cat.Gone"},
-	}
-	svc := newTestService(t, testDB, transport)
-
-	if _, err := testDB.SaveTrack(user.ID, db.SourceAppleMusic, &models.Track{
-		Name:           "Song",
-		Artist:         []models.Artist{{Name: "Song Artist"}},
-		URL:            "https://music.apple.com/us/song/cat.Song",
-		ServiceBaseUrl: "music.apple.com",
-		Timestamp:      time.Now().UTC(),
-	}); err != nil {
-		t.Fatalf("failed to seed track: %v", err)
-	}
-
-	if err := svc.ProcessUser(context.Background(), user); err != nil {
-		t.Fatalf("ProcessUser returned error: %v", err)
-	}
-
-	tracks, err := testDB.GetRecentTracksForService(user.ID, db.SourceAppleMusic, 100)
-	if err != nil {
-		t.Fatalf("failed to read tracks: %v", err)
-	}
-	var names []string
-	for _, track := range tracks {
-		names = append(names, track.Name)
-	}
-	if got := strings.Join(names, ","); got != "New,Gone,Song" {
-		t.Errorf("stored tracks = %q, want New,Gone,Song", got)
-	}
-}
-
-func TestPopulateCatalogMetadataRemembersMissingSong(t *testing.T) {
-	testDB := newTestDB(t)
-	user := createTestUser(t, testDB)
-	transport := &catalogTransport{missing: []string{"cat.Gone"}}
-	svc := newTestService(t, testDB, transport)
-
-	var items struct{ Data []AppleRecentTrack }
-	if err := json.Unmarshal([]byte(librarySongsJSON("Gone")), &items); err != nil {
-		t.Fatalf("failed to decode tracks: %v", err)
-	}
-
-	for range 2 {
-		track := items.Data[0]
-		if err := svc.populateCatalogMetadata(context.Background(), user, &track); !errors.Is(err, errNoCatalogSong) {
-			t.Fatalf("populateCatalogMetadata error = %v, want errNoCatalogSong", err)
+	for range 3 {
+		if err := env.svc.ProcessUser(context.Background(), env.user); err != nil {
+			t.Fatalf("ProcessUser returned error: %v", err)
 		}
 	}
 
-	if got := transport.requests["cat.Gone"]; got != 1 {
-		t.Errorf("catalog requested %d times, want 1", got)
+	if got := env.trackCount(t); got != 2 {
+		t.Errorf("expected 2 tracks (newest taken once), got %d", got)
 	}
-}
-
-func identitiesOf(ids ...string) []itemIdentity {
-	out := make([]itemIdentity, len(ids))
-	for i, id := range ids {
-		out[i] = itemIdentity{sourceID: id, url: "url:" + id}
-	}
-	return out
 }
 
 func historyOf(ids ...string) []*models.Track {
 	out := make([]*models.Track, len(ids))
 	for i, id := range ids {
-		out[i] = &models.Track{SourceID: id, URL: "url:" + id}
+		out[i] = &models.Track{SourceID: id}
 	}
 	return out
 }
@@ -917,16 +773,17 @@ func historyOf(ids ...string) []*models.Track {
 func TestAlignmentOffset(t *testing.T) {
 	tests := []struct {
 		name    string
-		window  []itemIdentity
+		window  []string
 		history []*models.Track
 		want    int
 		wantOK  bool
 	}{
-		{"nothing new", identitiesOf("a", "b"), historyOf("a", "b"), 0, true},
-		{"one new", identitiesOf("c", "a", "b"), historyOf("a", "b"), 1, true},
-		{"repeat after another track", identitiesOf("a", "b", "a", "z"), historyOf("a", "z"), 2, true},
-		{"no overlap", identitiesOf("c", "b"), historyOf("y", "z"), 0, false},
-		{"history shorter than window", identitiesOf("c", "b", "a"), historyOf("a"), 2, true},
+		{"nothing new", []string{"a", "b"}, historyOf("a", "b"), 0, true},
+		{"one new", []string{"c", "a", "b"}, historyOf("a", "b"), 1, true},
+		{"repeat after another track", []string{"a", "b", "a", "z"}, historyOf("a", "z"), 2, true},
+		{"no overlap", []string{"c", "b"}, historyOf("y", "z"), 0, false},
+		{"history shorter than window", []string{"c", "b", "a"}, historyOf("a"), 2, true},
+		{"row without resource id", []string{"a", "b"}, []*models.Track{{URL: "url:a"}, {SourceID: "b"}}, 0, false},
 	}
 
 	for _, tt := range tests {
@@ -936,16 +793,6 @@ func TestAlignmentOffset(t *testing.T) {
 				t.Errorf("alignmentOffset() = %d, %t, want %d, %t", got, ok, tt.want, tt.wantOK)
 			}
 		})
-	}
-}
-
-func TestAlignmentOffsetFallsBackToURLForLegacyRows(t *testing.T) {
-	// Rows written before source_id existed carry only a URL.
-	window := identitiesOf("a", "b")
-	history := []*models.Track{{URL: "url:a"}, {URL: "url:b"}}
-
-	if got, ok := alignmentOffset(window, history); got != 0 || !ok {
-		t.Errorf("alignmentOffset() = %d, %t, want 0, true (legacy rows matched on URL)", got, ok)
 	}
 }
 
