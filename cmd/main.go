@@ -21,6 +21,7 @@ import (
 	apikeyService "github.com/teal-fm/piper/service/apikey"
 	"github.com/teal-fm/piper/service/applemusic"
 	"github.com/teal-fm/piper/service/lastfm"
+	"github.com/teal-fm/piper/service/listenbrainz"
 	"github.com/teal-fm/piper/service/musicbrainz"
 	"github.com/teal-fm/piper/service/playingnow"
 	"github.com/teal-fm/piper/service/spotify"
@@ -99,7 +100,16 @@ func main() {
 		log.Fatalf("Error creating ATproto auth service: %v", err)
 	}
 
-	mbService := musicbrainz.NewMusicBrainzService(database)
+	// ListenBrainz resolves plays more reliably than MusicBrainz search, but its
+	// endpoint needs a token. Without one, NewClient returns nil and lookups
+	// fall back to searching MusicBrainz directly.
+	var mbOptions []musicbrainz.Option
+	if lb := listenbrainz.NewClient(viper.GetString("listenbrainz.token")); lb != nil {
+		log.Println("ListenBrainz lookup enabled")
+		mbOptions = append(mbOptions, musicbrainz.WithListenBrainz(lb))
+	}
+
+	mbService := musicbrainz.NewMusicBrainzService(database, mbOptions...)
 	playingNowService := playingnow.NewPlayingNowService(database, atprotoService, mbService)
 
 	// Check feature toggles for music services

@@ -64,13 +64,18 @@ func (mc *MetadataCleaner) DropForeignChars(text string) string {
 	b.Grow(len(text))
 
 	hasForeign := false
-	hasLetter := false
+	keptLetters, totalLetters := 0, 0
 
 	for _, r := range text {
+		isLetter := unicode.IsLetter(r)
+		if isLetter {
+			totalLetters++
+		}
+
 		if unicode.Is(unicode.Common, r) || mc.isPreferredScript(r) {
 			b.WriteRune(r)
-			if unicode.IsLetter(r) {
-				hasLetter = true
+			if isLetter {
+				keptLetters++
 			}
 		} else {
 			hasForeign = true
@@ -78,7 +83,12 @@ func (mc *MetadataCleaner) DropForeignChars(text string) string {
 	}
 
 	cleaned := strings.TrimSpace(b.String())
-	if hasForeign && len(cleaned) > 0 && hasLetter {
+
+	// Only returned the cleaned version if it retains more than half
+	// of the letters of the original text; otherwise we probably
+	// just cleaned a bunch of foreign chars and what's left isn't
+	// useful.
+	if hasForeign && cleaned != "" && keptLetters*2 >= totalLetters {
 		return cleaned
 	}
 	return text

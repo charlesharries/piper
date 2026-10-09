@@ -5,13 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"os"
 	"sync"
 	"time"
 
 	"github.com/bluesky-social/indigo/atproto/client"
 	lexutil "github.com/bluesky-social/indigo/lex/util"
-	"github.com/spf13/viper"
 
 	comatproto "github.com/bluesky-social/indigo/api/atproto"
 	"github.com/teal-fm/piper/api/teal"
@@ -68,7 +68,9 @@ func (p *Service) PublishPlayingNow(ctx context.Context, userID int64, track *mo
 		return fmt.Errorf("failed to get ATProto atProtoClient: %w", err)
 	}
 
-	hydratedTrack, err := musicbrainz.HydrateTrack(p.mb, *track)
+	hydrateCtx := musicbrainz.WithEventContext(ctx,
+		slog.Int64("user_id", userID), slog.String("play_source", "playingnow"))
+	hydratedTrack, err := p.mb.HydrateTrack(hydrateCtx, *track)
 	if err != nil {
 		p.logger.Printf("User %d: Error hydrating track '%s' with MusicBrainz: %v", userID, track.Name, err)
 	} else {
@@ -260,11 +262,7 @@ func (p *Service) trackToPlayView(track *models.Track) (*teal.FeedDefs_PlayView,
 		releaseNamePtr = &track.Album
 	}
 
-	// Get submission client agent
-	submissionAgent := viper.GetString("app.submission_agent")
-	if submissionAgent == "" {
-		submissionAgent = models.SubmissionAgent
-	}
+	submissionAgent := models.SubmissionAgent()
 
 	playView := &teal.FeedDefs_PlayView{
 		TrackName:             track.Name,

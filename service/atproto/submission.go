@@ -8,7 +8,6 @@ import (
 
 	comatproto "github.com/bluesky-social/indigo/api/atproto"
 	lexutil "github.com/bluesky-social/indigo/lex/util"
-	"github.com/spf13/viper"
 	"github.com/teal-fm/piper/api/teal"
 	"github.com/teal-fm/piper/models"
 	atprotoauth "github.com/teal-fm/piper/oauth/atproto"
@@ -90,11 +89,14 @@ func TrackToPlayRecord(track *models.Track) (*teal.FeedPlay, error) {
 		releaseNamePtr = &track.Album
 	}
 
-	// Get submission client agent
-	submissionAgent := viper.GetString("app.submission_agent")
-	if submissionAgent == "" {
-		submissionAgent = models.SubmissionAgent
+	// Resolving to the base release drops the edition the service reported, so
+	// carry it through rather than losing that a remaster was played.
+	var discriminantPtr *string
+	if track.ReleaseDiscriminant != "" {
+		discriminantPtr = &track.ReleaseDiscriminant
 	}
+
+	submissionAgent := models.SubmissionAgent()
 
 	playRecord := &teal.FeedPlay{
 		LexiconTypeID:         "fm.teal.feed.play",
@@ -105,6 +107,7 @@ func TrackToPlayRecord(track *models.Track) (*teal.FeedPlay, error) {
 		RecordingMbId:         models.FormatMBIDURI(track.RecordingMBID),
 		ReleaseMbId:           models.FormatMBIDURI(track.ReleaseMBID),
 		ReleaseName:           releaseNamePtr,
+		ReleaseDiscriminant:   discriminantPtr,
 		Isrc:                  isrcPtr,
 		OriginUri:             originURI,
 		MusicServiceUri:       serviceURI,
