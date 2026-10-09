@@ -505,6 +505,7 @@ func TestSignalsDisagreement(t *testing.T) {
 		{name: "a different album objects", sig: signals{{"duration", 1}, {"album", 0.5}}, want: "album"},
 		{name: "no evidence is not evidence against", sig: signals{{"title", 1}, {"artist", 1}}},
 		{name: "an isrc settles it", sig: signals{{"isrc", 1}}},
+		{name: "an isrc the candidate lacks objects", sig: signals{{"isrc", 0}, {"duration", 1}, {"album", 1}}, want: "isrc"},
 	}
 
 	for _, tt := range tests {
@@ -652,6 +653,40 @@ func TestResolveDoubtsListenBrainzWhenDurationDisagrees(t *testing.T) {
 	}
 	if match.Recording.ID != "official-mbid" {
 		t.Errorf("matched %q, want search to have overruled the bootleg cut", match.Recording.ID)
+	}
+	if len(transport.searches()) == 0 {
+		t.Error("expected a search for the second opinion")
+	}
+}
+
+// If MusicBrainz holds the same recording twice, and one of them has ISRCs
+// but the other does not, it can return recordings that match everything
+// but the ISRC -- which is wrong. We want the one with the ISRC!
+func TestResolveDoubtsListenBrainzWhenISRCUnconfirmed(t *testing.T) {
+	duplicate := recording("Autumn Leaves (Remastered 2025)", "Ryo Fukui", 391465,
+		release("Scenery", "SCENERY", "2025-09-24", "XW"))
+	duplicate.ID = "duplicate-mbid"
+
+	canonical := recording("Autumn Leaves", "Ryo Fukui", 391346,
+		release("シーナリィ", "SCENERY", "2025-09-24", "XW"))
+	canonical.ID = "canonical-mbid"
+	canonical.ISRCs = []string{"JPG921600015"}
+
+	svc, transport := newTestService(t,
+		route{match: "recording/duplicate-mbid", body: mustJSON(t, duplicate)},
+		route{match: "isrc", body: searchBody(t, canonical)},
+	)
+	svc.listenbrainz = stubListenBrainz{result: &ListenBrainzResult{RecordingMBID: "duplicate-mbid"}}
+
+	play := track("Autumn Leaves", "RYO FUKUI", "Scenery", "JPG921600015")
+	play.DurationMs = 391347
+
+	match, err := svc.Resolve(context.Background(), play)
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if match.Recording.ID != "canonical-mbid" {
+		t.Errorf("matched %q via %s, want the recording carrying the play's ISRC", match.Recording.ID, match.Source)
 	}
 	if len(transport.searches()) == 0 {
 		t.Error("expected a search for the second opinion")

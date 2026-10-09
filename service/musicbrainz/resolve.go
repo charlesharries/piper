@@ -99,14 +99,13 @@ func (s *Service) Resolve(ctx context.Context, track models.Track) (*Match, erro
 		best := ranked[0]
 		// A doubted ListenBrainz answer was not discarded; it still wins if
 		// search cannot do better.
-		if incumbent != nil && incumbent.Score >= best.score {
+		if incumbent != nil && incumbent.Score >= best.score && !best.reasons.isISRCMatch() {
 			ev.matched(incumbent)
 			return incumbent, nil
 		}
 
 		// Only the winner gets a release: the losers would each need their own
-		// lookup. -explain still shows it, which is what is being diagnosed
-		// when the recording was right and the pressing was not.
+		// lookup.
 		release := s.resolveRelease(ctx, in, best.recording)
 		ranked[0].release = release
 		match := &Match{
@@ -182,11 +181,14 @@ func (s *Service) listenBrainzOpinion(ctx context.Context, in matchInput, track 
 }
 
 // disagreement reports whether what the music service told us argues against a
-// candidate, naming the signal that objected. It reads the breakdown
-// scoreRecording already produced, so a signal missing from it -- no album
-// named, no length either side, an ISRC that settled it -- stays silent.
+// candidate, naming the signal that objected.
 func (s signals) disagreement() (string, bool) {
-	// Length first: it catches a bootleg pressing catalogued under the album's
+	// ListenBrainz matches on text, so in the rare case where MusicBrainz holds
+	// an album twice it can name the copy without ISRCs.
+	if isrc, ok := s.value("isrc"); ok && isrc == 0 {
+		return "isrc", true
+	}
+	// Length next: it catches a bootleg pressing catalogued under the album's
 	// own title, which the album test cannot see.
 	if duration, ok := s.value("duration"); ok && duration == 0 {
 		return "length", true

@@ -93,6 +93,10 @@ func scoreRecording(in matchInput, rec Recording) (float64, signals) {
 
 	var card scorecard
 
+	if in.isrc != "" {
+		card.signals = append(card.signals, signal{"isrc", 0})
+	}
+
 	title := in.titleScore(rec)
 	card.add("title", title, weightTitle)
 	card.add("artist", in.artistScore(rec.ArtistCredit), weightArtist)
@@ -358,6 +362,12 @@ func (s signals) value(name string) (float64, bool) {
 		}
 	}
 	return 0, false
+}
+
+// isISRCMatch reports whether the play's ISRC identified the candidate outright.
+func (s signals) isISRCMatch() bool {
+	isrc, ok := s.value("isrc")
+	return ok && isrc == 1
 }
 
 // candidate is a scored recording along with the release chosen for it.
