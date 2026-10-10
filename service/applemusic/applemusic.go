@@ -60,6 +60,12 @@ const (
 	syncBackoffBase = 1 * time.Minute
 	syncBackoffMax  = 15 * time.Minute
 
+	// authFailureGrace is how long Apple must keep rejecting a user's token,
+	// without a single successful sync in between, before we drop it. Apple
+	// intermittently answers 403 "Invalid authentication" for tokens that
+	// work again on the next request, so one rejection proves nothing.
+	authFailureGrace = 6 * time.Hour
+
 	// catalogCacheMax bounds the library-song catalog cache in a long-lived
 	// process.
 	catalogCacheMax = 1024
@@ -69,6 +75,9 @@ const (
 type syncState struct {
 	consecutiveFailures int
 	nextAttempt         time.Time
+	// authFailingSince is when Apple first rejected the user's token in the
+	// current run of failures; zero if it hasn't.
+	authFailingSince time.Time
 }
 
 // nowPlayingState remembers what we last published as a user's now-playing
@@ -372,18 +381,19 @@ type apiError struct {
 
 func (e *apiError) Error() string { return e.message }
 
-// permanent reports whether retrying could ever succeed. Apple answers 401 or
-// 403 when the Music-User-Token has expired or the user revoked access; only
-// re-linking fixes that.
-func (e *apiError) permanent() bool {
+// authRejected reports whether Apple refused the request's credentials. That
+// is what an expired or revoked Music-User-Token looks like, but Apple also
+// returns it spuriously, so it only means the token is dead if it persists.
+func (e *apiError) authRejected() bool {
 	return e.StatusCode == http.StatusUnauthorized || e.StatusCode == http.StatusForbidden
 }
 
 // retryable reports whether the same request is worth repeating within this
-// tick. 429 is deliberately excluded: we honour Retry-After by deferring the
-// user instead of holding the cycle open.
+// tick. Auth rejections are included because Apple's are often momentary.
+// 429 is deliberately excluded: we honour Retry-After by deferring the user
+// instead of holding the cycle open.
 func (e *apiError) retryable() bool {
-	return e.StatusCode >= 500
+	return e.StatusCode >= 500 || e.authRejected()
 }
 
 func newAppleMusicAPIError(statusCode int, status string, body []byte, retryAfter time.Duration) *apiError {
@@ -1063,11 +1073,16 @@ func (s *Service) syncUser(ctx context.Context, user *models.User) {
 
 	var apiErr *apiError
 	if errors.As(err, &apiErr) {
-		if apiErr.permanent() {
-			// The Music-User-Token is expired or revoked. Drop it so the user
-			// falls out of the poll roster and the UI prompts a re-link
-			// instead of us retrying a dead token forever.
-			s.logger.Printf("clearing dead Apple Music token for user %d: %v", user.ID, err)
+		if apiErr.authRejected() {
+			failingFor := s.recordAuthFailure(user.ID)
+			if failingFor < authFailureGrace {
+				return
+			}
+			// Apple has rejected the token for long enough that it must be
+			// expired or revoked. Drop it so the user falls out of the poll
+			// roster and the UI prompts a re-link instead of us retrying a
+			// dead token forever.
+			s.logger.Printf("clearing dead Apple Music token for user %d after %s of auth failures: %v", user.ID, failingFor.Round(time.Minute), err)
 			if clearErr := s.DB.ClearAppleMusicUserToken(user.ID); clearErr != nil {
 				s.logger.Printf("failed clearing Apple Music token for user %d: %v", user.ID, clearErr)
 			}
@@ -1100,7 +1115,23 @@ func (s *Service) recordSuccess(userID int64) {
 func (s *Service) recordFailure(userID int64, retryAfter time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.recordFailureLocked(userID, retryAfter)
+}
 
+// recordAuthFailure backs a user off like any other failure, and returns how
+// long their token has been rejected without a successful sync in between.
+func (s *Service) recordAuthFailure(userID int64) time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	state := s.recordFailureLocked(userID, 0)
+	if state.authFailingSince.IsZero() {
+		state.authFailingSince = time.Now()
+	}
+	return time.Since(state.authFailingSince)
+}
+
+func (s *Service) recordFailureLocked(userID int64, retryAfter time.Duration) *syncState {
 	if s.syncStates == nil {
 		s.syncStates = make(map[int64]*syncState)
 	}
@@ -1119,4 +1150,5 @@ func (s *Service) recordFailure(userID int64, retryAfter time.Duration) {
 		delay = retryAfter
 	}
 	state.nextAttempt = time.Now().Add(delay)
+	return state
 }
