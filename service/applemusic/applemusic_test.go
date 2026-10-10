@@ -577,19 +577,93 @@ func appleMusicToken(t *testing.T, testDB *db.DB, userID int64) string {
 	return *user.AppleMusicUserToken
 }
 
-func TestSyncUserClearsTokenOnUnauthorized(t *testing.T) {
+// invalidAuthentication is the 403 Apple sends both for a dead token and,
+// intermittently, for one that works again on the next request.
+func invalidAuthentication() *statusTransport {
+	return &statusTransport{
+		statusCode: http.StatusForbidden,
+		status:     "403 Forbidden",
+		body:       `{"errors":[{"status":"403","code":"40300","title":"Forbidden","detail":"Invalid authentication"}]}`,
+	}
+}
+
+// flakyTransport fails the first few requests with fail, then hands over to
+// next.
+type flakyTransport struct {
+	failures int
+	fail     http.RoundTripper
+	next     http.RoundTripper
+}
+
+func (t *flakyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if t.failures > 0 {
+		t.failures--
+		return t.fail.RoundTrip(req)
+	}
+	return t.next.RoundTrip(req)
+}
+
+func TestSyncUserRetriesMomentaryAuthRejection(t *testing.T) {
 	testDB := newTestDB(t)
 	user := createTestUser(t, testDB)
-	svc := newTestService(t, testDB, &statusTransport{
-		statusCode: http.StatusUnauthorized,
-		status:     "401 Unauthorized",
-		body:       `{"errors":[{"status":"401","code":"UNAUTHORIZED","title":"Unauthorized"}]}`,
+	svc := newTestService(t, testDB, &flakyTransport{
+		failures: 1,
+		fail:     invalidAuthentication(),
+		next:     &countingTransport{recent: recentTracksJSON("Song")},
 	})
+
+	svc.syncUser(context.Background(), user)
+
+	if got := appleMusicToken(t, testDB, user.ID); got != "fake-token" {
+		t.Errorf("apple music token = %q, want it kept", got)
+	}
+	if !svc.readyToSync(user.ID) {
+		t.Error("a 403 that clears on retry should not back the user off")
+	}
+}
+
+func TestSyncUserKeepsTokenOnAuthRejection(t *testing.T) {
+	testDB := newTestDB(t)
+	user := createTestUser(t, testDB)
+	svc := newTestService(t, testDB, invalidAuthentication())
+
+	svc.syncUser(context.Background(), user)
+
+	if got := appleMusicToken(t, testDB, user.ID); got != "fake-token" {
+		t.Errorf("apple music token = %q, want it kept", got)
+	}
+	if svc.readyToSync(user.ID) {
+		t.Error("user should be backed off after an auth rejection")
+	}
+}
+
+func TestSyncUserClearsTokenAfterSustainedAuthRejection(t *testing.T) {
+	testDB := newTestDB(t)
+	user := createTestUser(t, testDB)
+	svc := newTestService(t, testDB, invalidAuthentication())
+	svc.syncStates = map[int64]*syncState{
+		user.ID: {consecutiveFailures: 30, authFailingSince: time.Now().Add(-authFailureGrace)},
+	}
 
 	svc.syncUser(context.Background(), user)
 
 	if got := appleMusicToken(t, testDB, user.ID); got != "" {
 		t.Errorf("apple music token = %q, want it cleared", got)
+	}
+}
+
+func TestSyncUserSuccessForgetsAuthRejections(t *testing.T) {
+	testDB := newTestDB(t)
+	user := createTestUser(t, testDB)
+	svc := newTestService(t, testDB, &countingTransport{recent: recentTracksJSON("Song")})
+	svc.syncStates = map[int64]*syncState{
+		user.ID: {consecutiveFailures: 30, authFailingSince: time.Now().Add(-authFailureGrace)},
+	}
+
+	svc.syncUser(context.Background(), user)
+
+	if state := svc.syncStates[user.ID]; state != nil {
+		t.Errorf("sync state = %+v, want it reset by a successful sync", state)
 	}
 }
 
