@@ -30,6 +30,7 @@ COPY . .
 COPY --from=node_builder /app/static/main.css /app/pages/static/main.css
  #generate the jwks
 RUN GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags='-w -s -extldflags "-static"' -o main ./cmd
+RUN GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags='-w -s -extldflags "-static"' -o backfill-plays ./cmd/backfill-plays
 ARG TARGETOS=${TARGETPLATFORM%%/*}
 ARG TARGETARCH=${TARGETPLATFORM##*/}
 
@@ -38,4 +39,5 @@ FROM --platform=${TARGETPLATFORM:-linux/amd64} alpine:3.21
 WORKDIR /db
 WORKDIR /app
 COPY --from=builder /app/main /app/main
+COPY --from=builder /app/backfill-plays /app/backfill-plays
 ENTRYPOINT ["/app/main"]
